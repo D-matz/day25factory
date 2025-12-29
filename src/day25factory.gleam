@@ -74,6 +74,7 @@ type TimerTick {
 
 type Msg {
   ClockTickedForward(TimerTick)
+  UpdateSolvedLine(TimerTick)
   UserEnteredInput(String)
   UserClickedPower
   UserClickedReplay
@@ -89,32 +90,7 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             m.curr_problem.check_combo_parity == m.curr_problem.goal_bits_parity
           {
             True -> {
-              case m.problems {
-                [] -> {
-                  #(
-                    Model(..m, count: case m.count {
-                      Error(_) -> m.count
-                      Ok(ct) -> Ok(ct + set.size(m.curr_problem.check_combo))
-                    }),
-                    effect.none(),
-                  )
-                }
-                [next, ..rest] -> {
-                  #(
-                    Model(
-                      in: m.in,
-                      curr_problem: next,
-                      problems: rest,
-                      on_index: m.on_index,
-                      count: case m.count {
-                        Error(_) -> m.count
-                        Ok(ct) -> Ok(ct + set.size(m.curr_problem.check_combo))
-                      },
-                    ),
-                    tick(timer),
-                  )
-                }
-              }
+              #(m, tick_plus_delay(timer, 1000))
             }
             False -> {
               case m.curr_problem.combos {
@@ -147,7 +123,45 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     UserEnteredInput(input) -> {
       next_model(input, m.on_index + 1)
     }
+    UpdateSolvedLine(timer) -> {
+      case m.problems {
+        [] -> {
+          #(
+            Model(..m, count: case m.count {
+              Error(_) -> m.count
+              Ok(ct) -> Ok(ct + set.size(m.curr_problem.check_combo))
+            }),
+            effect.none(),
+          )
+        }
+        [next, ..rest] -> {
+          #(
+            Model(
+              in: m.in,
+              curr_problem: next,
+              problems: rest,
+              on_index: m.on_index,
+              count: case m.count {
+                Error(_) -> m.count
+                Ok(ct) -> Ok(ct + set.size(m.curr_problem.check_combo))
+              },
+            ),
+            tick(TimerTick(
+              index: timer.index,
+              millisec: ticks_for_len(next.num_bits),
+            )),
+          )
+        }
+      }
+    }
   }
+}
+
+fn tick_plus_delay(t: TimerTick, delay: Int) -> Effect(Msg) {
+  use dispatch <- effect.from
+  use <- set_timeout(t.millisec + delay)
+
+  dispatch(UpdateSolvedLine(t))
 }
 
 fn tick(t: TimerTick) -> Effect(Msg) {
@@ -164,16 +178,15 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
 
 fn next_model(input: String, index: Int) {
   let m = new_model(input, index)
-  let num_btns = m.curr_problem.num_bits |> list.length
-  #(m, tick(TimerTick(num_btns |> ticks_for_len, index)))
+  #(m, tick(TimerTick(ticks_for_len(m.curr_problem.num_bits), index)))
 }
 
-fn ticks_for_len(l: Int) {
-  let tick_ms = case l < 8 {
-    True -> 3000 / { l |> pow_2 }
+fn ticks_for_len(num_bits) {
+  let len = list.length(num_bits)
+  case len < 8 {
+    True -> 3000 / { len |> pow_2 }
     False -> 1
   }
-  echo tick_ms
 }
 
 fn new_model(input: String, curr_index: Int) {
@@ -431,23 +444,40 @@ fn view(model: Model) -> Element(Msg) {
                 with: fn(outer_acc, btn) {
                   let btn_on =
                     model.curr_problem.check_combo |> set.contains(btn)
-                  list.fold(
-                    from: [h.text("\n"), ..outer_acc],
-                    over: model.curr_problem.num_bits,
-                    with: fn(inner_acc, bit) {
-                      let new_elt = case
-                        btn.bits |> int.bitwise_and(pow_2(bit))
-                      {
-                        0 -> h.text("   ")
-                        _ ->
-                          case btn_on {
-                            True -> h.text("[x]")
-                            False -> h.text("[ ]")
-                          }
-                      }
-                      [new_elt, ..inner_acc]
-                    },
-                  )
+                  [
+                    h.text(
+                      string.concat([
+                        "(",
+                        model.curr_problem.num_bits
+                          |> list.filter(fn(n) {
+                            case pow_2(n) |> int.bitwise_and(btn.bits) {
+                              0 -> False
+                              _ -> True
+                            }
+                          })
+                          |> list.map(int.to_string)
+                          |> string.join(","),
+                        ")",
+                      ]),
+                    ),
+                    ..list.fold(
+                      from: [h.text("\n"), ..outer_acc],
+                      over: model.curr_problem.num_bits,
+                      with: fn(inner_acc, bit) {
+                        let new_elt = case
+                          btn.bits |> int.bitwise_and(pow_2(bit))
+                        {
+                          0 -> h.text("   ")
+                          _ ->
+                            case btn_on {
+                              True -> h.text("[x]")
+                              False -> h.text("[ ]")
+                            }
+                        }
+                        [new_elt, ..inner_acc]
+                      },
+                    )
+                  ]
                 },
               )
             ]),
