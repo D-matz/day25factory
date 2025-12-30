@@ -54,16 +54,20 @@ type Button {
   Button(bits: Int)
 }
 
-type LevelButtonCombo {
-  LevelButtonCombo(num_amts: Dict(Int, Int), cost: Int)
+pub type NumAmts {
+  NumAmts(num_amts: Dict(Int, Int))
 }
 
-type LevelButtonParityCombos {
-  LevelButtonParityCombos(parity_combos: List(LevelButtonCombo))
+pub type HowManyButtonsInCombo {
+  HowManyButtonsInCombo(buttons_used: Int)
 }
 
-type CombosForParity {
-  CombosForParity(cfp: Dict(Int, LevelButtonParityCombos))
+pub type LevelButtonCombo {
+  LevelButtonCombo(combo: Dict(NumAmts, HowManyButtonsInCombo))
+}
+
+pub type CombosForParity {
+  CombosForParity(cfp: Dict(Int, LevelButtonCombo))
 }
 
 type LevelCost {
@@ -79,7 +83,7 @@ type Levels {
 // need to remember how much even parity combo cost to get to this level
 // because of the awkward step by step
 type LTCost {
-  LTCost(child_tree: LevelTree, child_combo_cost: Int)
+  LTCost(child_tree: LevelTree, to_child: HowManyButtonsInCombo)
 }
 
 type LevelTree {
@@ -286,7 +290,7 @@ fn check_zeros_or_ltzero(lt: LevelTree) {
 
 fn levels_minus_combo_amt_then_halved(
   old_levels: Levels,
-  check_btn_combo_child: LevelButtonCombo,
+  check_btn_combo_child: NumAmts,
 ) -> Levels {
   Levels(
     old_levels.num_ctrs
@@ -316,17 +320,18 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
       // -- if new child, just add it to children (1 step)
       // -- if existing child with cost unknown, recurse on the child until we get a new child or calculate new cost
       let child_not_solved =
-        pcs.parity_combos
-        |> list.find(fn(check_btn_combo_child: LevelButtonCombo) {
+        pcs.combo
+        |> dict.to_list
+        |> list.find(fn(tpl) {
+          let combo_amts = tpl.0
           let new_levels =
-            lt.levels
-            |> levels_minus_combo_amt_then_halved(check_btn_combo_child)
-          case
+            lt.levels |> levels_minus_combo_amt_then_halved(combo_amts)
+          let check_child_missing_or_costunknown =
             lt.children
             |> list.find(fn(lt_child) {
               lt_child.child_tree.levels == new_levels
             })
-          {
+          case check_child_missing_or_costunknown {
             Error(_) -> True
             Ok(found_child) -> found_child.child_tree.cost == CostUnknown
           }
@@ -343,7 +348,7 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
                   CostImpossible -> acc
                   CostVal(child_cost) -> {
                     let our_cost_to_child =
-                      child.child_combo_cost + { child_cost * 2 }
+                      child.to_child.buttons_used + { child_cost * 2 }
                     case acc {
                       CostUnknown -> panic as "we never set acc to cost unknown"
                       CostImpossible -> CostVal(our_cost_to_child)
@@ -360,7 +365,7 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
         }
         Ok(missing_lbc) -> {
           let look_for_levels =
-            lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc)
+            lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc.0)
           let missing_or_costunknown =
             lt.children
             |> list.find(fn(lt_child) {
@@ -376,17 +381,14 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
                 )
               let new_leveltree = check_zeros_or_ltzero(new_leveltree)
               [
-                LTCost(
-                  child_combo_cost: missing_lbc.cost,
-                  child_tree: new_leveltree,
-                ),
+                LTCost(to_child: missing_lbc.1, child_tree: new_leveltree),
                 ..lt.children
               ]
             }
             Ok(ch) -> {
               let existing_child_updated_cost =
                 LTCost(
-                  child_combo_cost: ch.child_combo_cost,
+                  to_child: ch.to_child,
                   child_tree: lt_one_step(
                     precomputed_parity_combos,
                     ch.child_tree,
@@ -546,17 +548,33 @@ fn new_model(input: String, curr_index: Int, t: M) {
                       )
                     },
                   )
-                let new_combo =
-                  LevelButtonCombo(num_amts:, cost: combination |> list.length)
+                let new_cost =
+                  HowManyButtonsInCombo(
+                    buttons_used: combination |> list.length,
+                  )
+                let new_amt = NumAmts(num_amts:)
                 let parity = Levels(num_amts) |> levels_parity
                 let existing = acc.cfp |> dict.get(parity)
                 let with_new_cfp = case existing {
-                  Error(_) -> [new_combo]
-                  Ok(others) -> [new_combo, ..others.parity_combos]
+                  Error(_) -> dict.new() |> dict.insert(new_amt, new_cost)
+                  Ok(others) -> {
+                    case others.combo |> dict.get(new_amt) {
+                      Error(_) -> others.combo |> dict.insert(new_amt, new_cost)
+                      Ok(combo_same_total) ->
+                        others.combo
+                        |> dict.insert(
+                          new_amt,
+                          HowManyButtonsInCombo(int.min(
+                            combo_same_total.buttons_used,
+                            new_cost.buttons_used,
+                          )),
+                        )
+                    }
+                  }
                 }
                 CombosForParity(
                   cfp: acc.cfp
-                  |> dict.insert(parity, LevelButtonParityCombos(with_new_cfp)),
+                  |> dict.insert(parity, LevelButtonCombo(with_new_cfp)),
                 )
               },
             )
@@ -624,9 +642,9 @@ fn all_combinations(l) {
 fn view(model: Model) -> Element(Msg) {
   h.article(
     [
-      a.style("background", "#584355"),
+      a.style("background", "#292d3e"),
       a.style("color", "#fefefc"),
-      a.style("font-family", "sans-serif"),
+      a.style("font-family", "verdana, helvetica, sans-serif"),
       a.style("height", "#100%"),
       a.style("margin", "0px"),
       a.style("display", "flex"),
