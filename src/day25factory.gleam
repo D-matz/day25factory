@@ -18,19 +18,22 @@ fn pow_2(n: Int) {
   }
 }
 
-//set of buttons (each a parity int) converted to parity int
+// set of buttons (each a parity int) converted to parity int
+// used for p1
 fn parity(btns: Set(Button)) {
   set.fold(from: 0, over: btns, with: fn(acc, btn) {
     acc |> int.bitwise_exclusive_or(btn.bits)
   })
 }
 
-//list of buttons (each a list of nums) converted to parity int
-fn parity_button_list(btns: List(List(Int))) {
-  list.fold(from: 0, over: btns, with: fn(outer_acc, btn) {
-    list.fold(from: outer_acc, over: btn, with: fn(inner_acc, num) {
-      inner_acc |> int.bitwise_exclusive_or(pow_2(num))
-    })
+// combo of buttons, so can have >1 of a num, converted to parity int
+// used for p2
+fn levels_parity(l: Levels) {
+  dict.fold(from: 0, over: l.num_ctrs, with: fn(acc, light, value) {
+    case value % 2 == 0 {
+      True -> acc
+      False -> acc |> int.bitwise_exclusive_or(pow_2(light))
+    }
   })
 }
 
@@ -51,26 +54,36 @@ type Button {
   Button(bits: Int)
 }
 
+type LevelButtonCombo {
+  LevelButtonCombo(num_amts: Dict(Int, Int), cost: Int)
+}
+
+type LevelButtonParityCombos {
+  LevelButtonParityCombos(parity_combos: List(LevelButtonCombo))
+}
+
+type CombosForParity {
+  CombosForParity(cfp: Dict(Int, LevelButtonParityCombos))
+}
+
 type LevelCost {
   CostUnknown
   CostImpossible
   CostVal(Int)
 }
 
+type Levels {
+  Levels(num_ctrs: Dict(Int, Int))
+}
+
+// need to remember how much even parity combo cost to get to this level
+// because of the awkward step by step
+type LTCost {
+  LTCost(child_tree: LevelTree, child_combo_cost: Int)
+}
+
 type LevelTree {
-  LevelTree(levels: List(Int), cost: LevelCost, leaves: List(LevelTree))
-}
-
-type LevelButton {
-  LevelButton(nums: List(Int))
-}
-
-type LevelButtonCombo {
-  LevelButtonCombo(combo: List(LevelButton))
-}
-
-type LevelButtonParityCombos {
-  LevelButtonParityCombos(parity_combos: List(LevelButtonCombo))
+  LevelTree(levels: Levels, cost: LevelCost, children: List(LTCost))
 }
 
 type OneLine {
@@ -82,7 +95,7 @@ type OneLine {
     check_combo: Set(Button),
     check_combo_parity: Int,
   )
-  OneLineLevel(combos: Dict(Int, LevelButtonParityCombos), explored: LevelTree)
+  OneLineLevel(combos: CombosForParity, tree: LevelTree)
 }
 
 type Model {
@@ -96,7 +109,7 @@ type Model {
 }
 
 fn init(starting_example) -> #(Model, Effect(Msg)) {
-  next_model(starting_example, 0, OnOffs)
+  next_model(starting_example, 0, LevelM)
 }
 
 // UPDATE ----------------------------------------------------------------------
@@ -170,14 +183,16 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                       )
                     }
                     [] -> {
-                      todo
+                      panic as "no combos left should say count impossible"
                     }
                   }
                 }
               }
             }
-            OneLineLevel(combos:, explored:) -> {
-              todo
+            OneLineLevel(combos:, tree:) -> {
+              let updated_tree = lt_one_step(combos, tree)
+              let updated_line = OneLineLevel(combos:, tree: updated_tree)
+              #(Model(..m, curr_problem: updated_line), tick(timer))
             }
           }
         }
@@ -185,20 +200,20 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     UserClickedPower -> {
       next_model(m.in, m.on_index + 1, case m.curr_problem {
-        OneLineLevel(_, _) -> OnOffs
-        OneLineOnOff(_, _, _, _, _, _) -> Levels
+        OneLineLevel(_, _) -> OnOffM
+        OneLineOnOff(_, _, _, _, _, _) -> LevelM
       })
     }
     UserClickedReplay -> {
       next_model(m.in, m.on_index + 1, case m.curr_problem {
-        OneLineOnOff(_, _, _, _, _, _) -> OnOffs
-        OneLineLevel(_, _) -> Levels
+        OneLineOnOff(_, _, _, _, _, _) -> OnOffM
+        OneLineLevel(_, _) -> LevelM
       })
     }
     UserEnteredInput(input) -> {
       next_model(input, m.on_index + 1, case m.curr_problem {
-        OneLineOnOff(_, _, _, _, _, _) -> OnOffs
-        OneLineLevel(_, _) -> Levels
+        OneLineOnOff(_, _, _, _, _, _) -> OnOffM
+        OneLineLevel(_, _) -> LevelM
       })
     }
     //after solving line wait a sec before going to next line to show solution
@@ -241,7 +256,142 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             )),
           )
         }
-        OneLineLevel(combos:, explored:) -> todo
+        OneLineLevel(combos:, tree:) -> panic as "solved line"
+      }
+    }
+  }
+}
+
+fn levels_minus_combo_amt_then_halved(
+  lt: Levels,
+  check_btn_combo_child: LevelButtonCombo,
+) {
+  dict.fold(
+    from: lt,
+    over: check_btn_combo_child.num_amts,
+    with: fn(acc, num, amt) {
+      let curr_amt = acc.num_ctrs |> dict.get(num)
+      let new_amt = case curr_amt {
+        Error(_) ->
+          panic as "combo has button with a num not in the level nums??"
+        Ok(v) -> { v - amt } / 2
+      }
+      Levels(acc.num_ctrs |> dict.insert(num, new_amt))
+    },
+  )
+}
+
+fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
+  let level_values =
+    lt.levels.num_ctrs
+    |> dict.to_list
+    |> list.map(fn(tpl) { tpl.1 })
+  let elt_ne_zero =
+    level_values
+    |> list.find(fn(n) { n != 0 })
+  case elt_ne_zero {
+    Error(_) -> LevelTree(..lt, cost: CostVal(0))
+    Ok(_) -> {
+      let elt_lt_zero =
+        level_values
+        |> list.find(fn(n) { n < 0 })
+      case elt_lt_zero {
+        Ok(_) -> LevelTree(..lt, cost: CostImpossible)
+        Error(_) -> {
+          case
+            precomputed_parity_combos.cfp
+            |> dict.get(lt.levels |> levels_parity)
+          {
+            Error(_) -> LevelTree(..lt, cost: CostImpossible)
+            Ok(pcs) -> {
+              // child_not_solved might not be found
+              // - in that case, we have all children and the cost val or impossible for each, so calc min for this one (1 step)
+              // child_not_solved might be found
+              // - in that case, button combo that takes us to a new child or child with cost unknown
+              // -- if new child, just add it to children (1 step)
+              // -- if existing child with cost unknown, recurse on the child until we get a new child or calculate new cost
+              let child_not_solved =
+                pcs.parity_combos
+                |> list.find(fn(check_btn_combo_child: LevelButtonCombo) {
+                  let new_levels =
+                    lt.levels
+                    |> levels_minus_combo_amt_then_halved(check_btn_combo_child)
+                  case
+                    lt.children
+                    |> list.find(fn(lt_child) {
+                      lt_child.child_tree.levels == new_levels
+                    })
+                  {
+                    Error(_) -> True
+                    Ok(found_child) ->
+                      found_child.child_tree.cost == CostUnknown
+                  }
+                })
+              case child_not_solved {
+                Error(_) -> {
+                  //all children are solved -> can calc min for htis one
+                  let min_cost =
+                    list.fold(
+                      from: CostImpossible,
+                      over: lt.children,
+                      with: fn(acc, child) {
+                        case child.child_tree.cost {
+                          CostImpossible -> acc
+                          CostVal(child_cost) -> {
+                            let our_cost_to_child =
+                              child.child_combo_cost + { child_cost * 2 }
+                            case acc {
+                              CostUnknown ->
+                                panic as "we never set acc to cost unknown"
+                              CostImpossible -> CostVal(our_cost_to_child)
+                              CostVal(curr_cost) ->
+                                CostVal(int.min(curr_cost, our_cost_to_child))
+                            }
+                          }
+                          CostUnknown ->
+                            panic as "should not be any children left with cost unknown"
+                        }
+                      },
+                    )
+                  LevelTree(..lt, cost: min_cost)
+                }
+                Ok(missing_lbc) -> {
+                  let look_for_levels =
+                    lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc)
+                  let missing_or_costunknown =
+                    lt.children
+                    |> list.find(fn(lt_child) {
+                      lt_child.child_tree.levels == look_for_levels
+                    })
+                  let new_child = case missing_or_costunknown {
+                    Error(_) ->
+                      LTCost(
+                        child_combo_cost: missing_lbc.cost,
+                        child_tree: lt_one_step(
+                          precomputed_parity_combos,
+                          LevelTree(
+                            children: [],
+                            cost: CostUnknown,
+                            levels: look_for_levels,
+                          ),
+                        ),
+                      )
+                    Ok(ch) -> {
+                      LTCost(
+                        child_combo_cost: ch.child_combo_cost,
+                        child_tree: lt_one_step(
+                          precomputed_parity_combos,
+                          ch.child_tree,
+                        ),
+                      )
+                    }
+                  }
+                  LevelTree(..lt, children: [new_child, ..lt.children])
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -269,7 +419,7 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
 fn next_model(input: String, index: Int, t: M) {
   let m = new_model(input, index, t)
   case m.curr_problem {
-    OneLineLevel(combos:, explored:) -> todo
+    OneLineLevel(combos:, tree:) -> #(m, tick(TimerTick(2300, index)))
     OneLineOnOff(
       btns:,
       goal_bits_parity:,
@@ -290,8 +440,8 @@ fn ticks_for_len(num_bits) {
 }
 
 type M {
-  OnOffs
-  Levels
+  OnOffM
+  LevelM
 }
 
 fn new_model(input: String, curr_index: Int, t: M) {
@@ -300,7 +450,8 @@ fn new_model(input: String, curr_index: Int, t: M) {
     |> string.split("\n")
     |> list.map(fn(line) {
       let assert [goal, ..rest] = line |> string.split("]")
-      let assert [buttons, ..] = rest |> string.concat |> string.split("{")
+      let assert [buttons, ..goal_levels] =
+        rest |> string.concat |> string.split("{")
       let btn_numlists =
         buttons
         |> string.replace("(", "")
@@ -316,7 +467,7 @@ fn new_model(input: String, curr_index: Int, t: M) {
           })
         })
       case t {
-        OnOffs -> {
+        OnOffM -> {
           let btns =
             btn_numlists
             |> list.map(fn(btn) {
@@ -360,24 +511,46 @@ fn new_model(input: String, curr_index: Int, t: M) {
             check_combo_parity: first_combo |> parity,
           )
         }
-        Levels -> {
-          let btn_parity_combos =
+        LevelM -> {
+          let btn_parity_combos: CombosForParity =
             list.fold(
-              from: dict.new(),
+              from: CombosForParity(cfp: dict.new()),
               over: all_combinations(btn_numlists),
-              with: fn(acc, combo) {
-                let parity = combo |> parity_button_list
-                let existing = acc |> dict.get(parity)
-                let new = case existing {
-                  Error(_) -> [combo]
-                  Ok(others) -> [combo, ..others]
+              with: fn(acc, combination) {
+                let num_amts =
+                  list.fold(
+                    from: dict.new(),
+                    over: combination,
+                    with: fn(outer_acc, btn) {
+                      list.fold(
+                        from: outer_acc,
+                        over: btn,
+                        with: fn(inner_acc, num) {
+                          let curr_val = inner_acc |> dict.get(num)
+                          case curr_val {
+                            Error(_) -> inner_acc |> dict.insert(num, 1)
+                            Ok(v) -> inner_acc |> dict.insert(num, v + 1)
+                          }
+                        },
+                      )
+                    },
+                  )
+                let new_combo =
+                  LevelButtonCombo(num_amts:, cost: combination |> list.length)
+                let parity = Levels(num_amts) |> levels_parity
+                let existing = acc.cfp |> dict.get(parity)
+                let with_new_cfp = case existing {
+                  Error(_) -> [new_combo]
+                  Ok(others) -> [new_combo, ..others.parity_combos]
                 }
-                acc |> dict.insert(parity, new)
+                CombosForParity(
+                  cfp: acc.cfp
+                  |> dict.insert(parity, LevelButtonParityCombos(with_new_cfp)),
+                )
               },
             )
-
-          let starting_level =
-            rest
+          let goal_ints =
+            goal_levels
             |> string.concat
             |> string.drop_end(1)
             |> string.split(",")
@@ -385,7 +558,19 @@ fn new_model(input: String, curr_index: Int, t: M) {
               let assert Ok(n) = int.parse(x)
               n
             })
-          OneLineLevel(combos: todo, explored: todo)
+          let starting_levels =
+            list.index_fold(
+              from: dict.new(),
+              over: goal_ints,
+              with: fn(acc, amt, idx) { acc |> dict.insert(idx, amt) },
+            )
+          let starting_tree =
+            LevelTree(
+              levels: Levels(starting_levels),
+              cost: CostUnknown,
+              children: [],
+            )
+          OneLineLevel(combos: btn_parity_combos, tree: starting_tree)
         }
       }
     })
@@ -428,6 +613,11 @@ fn all_combinations(l) {
 fn view(model: Model) -> Element(Msg) {
   h.article(
     [
+      a.style("background", "#584355"),
+      a.style("color", "#fefefc"),
+      a.style("font-family", "sans-serif"),
+      a.style("height", "#100%"),
+      a.style("margin", "0px"),
       a.style("display", "flex"),
       a.style("flex-direction", "column"),
       a.style("gap", "5px"),
@@ -442,10 +632,10 @@ fn view(model: Model) -> Element(Msg) {
         h.a(
           [
             a.href(
-              "https://github.com/D-matz/day25tachyon/blob/main/src/tachyon.gleam",
+              "https://github.com/D-matz/day25factory/blob/main/src/day25factory.gleam",
             ),
           ],
-          [h.text("(source todo)")],
+          [h.text("(source)")],
         ),
       ]),
       h.p([], case False {
@@ -625,8 +815,35 @@ fn view(model: Model) -> Element(Msg) {
               ),
           )
         }
-        OneLineLevel(combos:, explored:) -> h.pre([], [h.text("power levels")])
+        OneLineLevel(_, tree:) -> h.pre([], tree |> view_tree_lines(0))
       },
     ],
   )
+}
+
+fn view_tree_lines(lt: LevelTree, indent: Int) -> List(Element(Msg)) {
+  let level_nums_string =
+    string.concat([
+      string.repeat(" ", indent),
+      "(",
+      lt.levels.num_ctrs
+        |> dict.to_list
+        |> list.sort(fn(d1, d2) { int.compare(d1.0, d2.0) })
+        |> list.map(fn(tpl) { tpl.1 |> int.to_string })
+        |> string.join(","),
+      ") ",
+      case lt.cost {
+        CostUnknown -> "?"
+        CostImpossible -> "∞"
+        CostVal(v) -> v |> int.to_string
+      },
+      "\n",
+    ])
+
+  [
+    h.text(level_nums_string),
+    ..list.fold(from: [], over: lt.children, with: fn(acc, lt_child) {
+      acc |> list.append(view_tree_lines(lt_child.child_tree, indent + 1))
+    })
+  ]
 }
