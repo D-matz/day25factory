@@ -263,21 +263,20 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 }
 
 fn levels_minus_combo_amt_then_halved(
-  lt: Levels,
+  old_levels: Levels,
   check_btn_combo_child: LevelButtonCombo,
-) {
-  dict.fold(
-    from: lt,
-    over: check_btn_combo_child.num_amts,
-    with: fn(acc, num, amt) {
-      let curr_amt = acc.num_ctrs |> dict.get(num)
-      let new_amt = case curr_amt {
-        Error(_) ->
-          panic as "combo has button with a num not in the level nums??"
-        Ok(v) -> { v - amt } / 2
+) -> Levels {
+  Levels(
+    old_levels.num_ctrs
+    |> dict.map_values(fn(num, old_amt) {
+      let subtract_combo = case
+        check_btn_combo_child.num_amts |> dict.get(num)
+      {
+        Error(_) -> old_amt
+        Ok(combo_amt) -> old_amt - combo_amt
       }
-      Levels(acc.num_ctrs |> dict.insert(num, new_amt))
-    },
+      subtract_combo / 2
+    }),
   )
 }
 
@@ -356,37 +355,49 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
                   LevelTree(..lt, cost: min_cost)
                 }
                 Ok(missing_lbc) -> {
+                  echo lt.levels
+                  echo missing_lbc
                   let look_for_levels =
                     lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc)
+                  echo look_for_levels
+                  echo "----------------"
                   let missing_or_costunknown =
                     lt.children
                     |> list.find(fn(lt_child) {
                       lt_child.child_tree.levels == look_for_levels
                     })
-                  let new_child = case missing_or_costunknown {
-                    Error(_) ->
-                      LTCost(
-                        child_combo_cost: missing_lbc.cost,
-                        child_tree: lt_one_step(
-                          precomputed_parity_combos,
-                          LevelTree(
+                  let new_children = case missing_or_costunknown {
+                    Error(_) -> {
+                      let new_child =
+                        LTCost(
+                          child_combo_cost: missing_lbc.cost,
+                          child_tree: LevelTree(
                             children: [],
                             cost: CostUnknown,
                             levels: look_for_levels,
                           ),
-                        ),
-                      )
+                        )
+                      [new_child, ..lt.children]
+                    }
                     Ok(ch) -> {
-                      LTCost(
-                        child_combo_cost: ch.child_combo_cost,
-                        child_tree: lt_one_step(
-                          precomputed_parity_combos,
-                          ch.child_tree,
-                        ),
-                      )
+                      let existing_child_updated_cost =
+                        LTCost(
+                          child_combo_cost: ch.child_combo_cost,
+                          child_tree: lt_one_step(
+                            precomputed_parity_combos,
+                            ch.child_tree,
+                          ),
+                        )
+                      lt.children
+                      |> list.map(fn(old_child) {
+                        case old_child.child_tree.levels == look_for_levels {
+                          True -> existing_child_updated_cost
+                          False -> old_child
+                        }
+                      })
                     }
                   }
-                  LevelTree(..lt, children: [new_child, ..lt.children])
+                  LevelTree(..lt, children: new_children)
                 }
               }
             }
@@ -419,7 +430,7 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
 fn next_model(input: String, index: Int, t: M) {
   let m = new_model(input, index, t)
   case m.curr_problem {
-    OneLineLevel(combos:, tree:) -> #(m, tick(TimerTick(2300, index)))
+    OneLineLevel(combos:, tree:) -> #(m, tick(TimerTick(1300, index)))
     OneLineOnOff(
       btns:,
       goal_bits_parity:,
@@ -638,8 +649,8 @@ fn view(model: Model) -> Element(Msg) {
           [h.text("(source)")],
         ),
       ]),
-      h.p([], case False {
-        True -> [
+      h.p([], case model.curr_problem {
+        OneLineLevel(_, _) -> [
           h.text("From "),
           h.a(
             [
@@ -653,7 +664,7 @@ fn view(model: Model) -> Element(Msg) {
             ": for all combos of 0 or 1 of each button making all counters even, divide by 2 and recurse.",
           ),
         ]
-        False -> [
+        OneLineOnOff(_, _, _, _, _, _) -> [
           h.text(
             "Pressing a button twice negates itself and does nothing, so a minimal solution presses each button at most once.",
           ),
