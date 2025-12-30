@@ -262,6 +262,28 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   }
 }
 
+fn check_zeros_or_ltzero(lt: LevelTree, callback) {
+  let level_values =
+    lt.levels.num_ctrs
+    |> dict.to_list
+    |> list.map(fn(tpl) { tpl.1 })
+  let elt_ne_zero =
+    level_values
+    |> list.find(fn(n) { n != 0 })
+  case elt_ne_zero {
+    Error(_) -> LevelTree(..lt, cost: CostVal(0))
+    Ok(_) -> {
+      let elt_lt_zero =
+        level_values
+        |> list.find(fn(n) { n < 0 })
+      case elt_lt_zero {
+        Ok(_) -> LevelTree(..lt, cost: CostImpossible)
+        Error(_) -> callback()
+      }
+    }
+  }
+}
+
 fn levels_minus_combo_amt_then_halved(
   old_levels: Levels,
   check_btn_combo_child: LevelButtonCombo,
@@ -281,127 +303,102 @@ fn levels_minus_combo_amt_then_halved(
 }
 
 fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
-  let level_values =
-    lt.levels.num_ctrs
-    |> dict.to_list
-    |> list.map(fn(tpl) { tpl.1 })
-  let elt_ne_zero =
-    level_values
-    |> list.find(fn(n) { n != 0 })
-  case elt_ne_zero {
-    Error(_) -> LevelTree(..lt, cost: CostVal(0))
-    Ok(_) -> {
-      let elt_lt_zero =
-        level_values
-        |> list.find(fn(n) { n < 0 })
-      case elt_lt_zero {
-        Ok(_) -> LevelTree(..lt, cost: CostImpossible)
-        Error(_) -> {
+  use <- check_zeros_or_ltzero(lt)
+  case
+    precomputed_parity_combos.cfp
+    |> dict.get(lt.levels |> levels_parity)
+  {
+    Error(_) -> LevelTree(..lt, cost: CostImpossible)
+    Ok(pcs) -> {
+      // child_not_solved might not be found
+      // - in that case, we have all children and the cost val or impossible for each, so calc min for this one (1 step)
+      // child_not_solved might be found
+      // - in that case, button combo that takes us to a new child or child with cost unknown
+      // -- if new child, just add it to children (1 step)
+      // -- if existing child with cost unknown, recurse on the child until we get a new child or calculate new cost
+      let child_not_solved =
+        pcs.parity_combos
+        |> list.find(fn(check_btn_combo_child: LevelButtonCombo) {
+          let new_levels =
+            lt.levels
+            |> levels_minus_combo_amt_then_halved(check_btn_combo_child)
           case
-            precomputed_parity_combos.cfp
-            |> dict.get(lt.levels |> levels_parity)
+            lt.children
+            |> list.find(fn(lt_child) {
+              lt_child.child_tree.levels == new_levels
+            })
           {
-            Error(_) -> LevelTree(..lt, cost: CostImpossible)
-            Ok(pcs) -> {
-              // child_not_solved might not be found
-              // - in that case, we have all children and the cost val or impossible for each, so calc min for this one (1 step)
-              // child_not_solved might be found
-              // - in that case, button combo that takes us to a new child or child with cost unknown
-              // -- if new child, just add it to children (1 step)
-              // -- if existing child with cost unknown, recurse on the child until we get a new child or calculate new cost
-              let child_not_solved =
-                pcs.parity_combos
-                |> list.find(fn(check_btn_combo_child: LevelButtonCombo) {
-                  let new_levels =
-                    lt.levels
-                    |> levels_minus_combo_amt_then_halved(check_btn_combo_child)
-                  case
-                    lt.children
-                    |> list.find(fn(lt_child) {
-                      lt_child.child_tree.levels == new_levels
-                    })
-                  {
-                    Error(_) -> True
-                    Ok(found_child) ->
-                      found_child.child_tree.cost == CostUnknown
-                  }
-                })
-              case child_not_solved {
-                Error(_) -> {
-                  //all children are solved -> can calc min for htis one
-                  let min_cost =
-                    list.fold(
-                      from: CostImpossible,
-                      over: lt.children,
-                      with: fn(acc, child) {
-                        case child.child_tree.cost {
-                          CostImpossible -> acc
-                          CostVal(child_cost) -> {
-                            let our_cost_to_child =
-                              child.child_combo_cost + { child_cost * 2 }
-                            case acc {
-                              CostUnknown ->
-                                panic as "we never set acc to cost unknown"
-                              CostImpossible -> CostVal(our_cost_to_child)
-                              CostVal(curr_cost) ->
-                                CostVal(int.min(curr_cost, our_cost_to_child))
-                            }
-                          }
-                          CostUnknown ->
-                            panic as "should not be any children left with cost unknown"
-                        }
-                      },
-                    )
-                  LevelTree(..lt, cost: min_cost)
-                }
-                Ok(missing_lbc) -> {
-                  echo lt.levels
-                  echo missing_lbc
-                  let look_for_levels =
-                    lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc)
-                  echo look_for_levels
-                  echo "----------------"
-                  let missing_or_costunknown =
-                    lt.children
-                    |> list.find(fn(lt_child) {
-                      lt_child.child_tree.levels == look_for_levels
-                    })
-                  let new_children = case missing_or_costunknown {
-                    Error(_) -> {
-                      let new_child =
-                        LTCost(
-                          child_combo_cost: missing_lbc.cost,
-                          child_tree: LevelTree(
-                            children: [],
-                            cost: CostUnknown,
-                            levels: look_for_levels,
-                          ),
-                        )
-                      [new_child, ..lt.children]
-                    }
-                    Ok(ch) -> {
-                      let existing_child_updated_cost =
-                        LTCost(
-                          child_combo_cost: ch.child_combo_cost,
-                          child_tree: lt_one_step(
-                            precomputed_parity_combos,
-                            ch.child_tree,
-                          ),
-                        )
-                      lt.children
-                      |> list.map(fn(old_child) {
-                        case old_child.child_tree.levels == look_for_levels {
-                          True -> existing_child_updated_cost
-                          False -> old_child
-                        }
-                      })
+            Error(_) -> True
+            Ok(found_child) -> found_child.child_tree.cost == CostUnknown
+          }
+        })
+      case child_not_solved {
+        Error(_) -> {
+          //all children are solved -> can calc min for htis one
+          let min_cost =
+            list.fold(
+              from: CostImpossible,
+              over: lt.children,
+              with: fn(acc, child) {
+                case child.child_tree.cost {
+                  CostImpossible -> acc
+                  CostVal(child_cost) -> {
+                    let our_cost_to_child =
+                      child.child_combo_cost + { child_cost * 2 }
+                    case acc {
+                      CostUnknown -> panic as "we never set acc to cost unknown"
+                      CostImpossible -> CostVal(our_cost_to_child)
+                      CostVal(curr_cost) ->
+                        CostVal(int.min(curr_cost, our_cost_to_child))
                     }
                   }
-                  LevelTree(..lt, children: new_children)
+                  CostUnknown ->
+                    panic as "should not be any children left with cost unknown"
                 }
-              }
+              },
+            )
+          LevelTree(..lt, cost: min_cost)
+        }
+        Ok(missing_lbc) -> {
+          let look_for_levels =
+            lt.levels |> levels_minus_combo_amt_then_halved(missing_lbc)
+          let missing_or_costunknown =
+            lt.children
+            |> list.find(fn(lt_child) {
+              lt_child.child_tree.levels == look_for_levels
+            })
+          let new_children = case missing_or_costunknown {
+            Error(_) -> {
+              let new_child =
+                LTCost(
+                  child_combo_cost: missing_lbc.cost,
+                  child_tree: LevelTree(
+                    children: [],
+                    cost: CostUnknown,
+                    levels: look_for_levels,
+                  ),
+                )
+              [new_child, ..lt.children]
+            }
+            Ok(ch) -> {
+              let existing_child_updated_cost =
+                LTCost(
+                  child_combo_cost: ch.child_combo_cost,
+                  child_tree: lt_one_step(
+                    precomputed_parity_combos,
+                    ch.child_tree,
+                  ),
+                )
+              lt.children
+              |> list.map(fn(old_child) {
+                case old_child.child_tree.levels == look_for_levels {
+                  True -> existing_child_updated_cost
+                  False -> old_child
+                }
+              })
             }
           }
+          LevelTree(..lt, children: new_children)
         }
       }
     }
