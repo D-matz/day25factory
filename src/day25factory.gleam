@@ -190,9 +190,24 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               }
             }
             OneLineLevel(combos:, tree:) -> {
-              let updated_tree = lt_one_step(combos, tree)
-              let updated_line = OneLineLevel(combos:, tree: updated_tree)
-              #(Model(..m, curr_problem: updated_line), tick(timer))
+              case tree.cost {
+                CostUnknown -> {
+                  let updated_tree = lt_one_step(combos, tree)
+                  let updated_line = OneLineLevel(combos:, tree: updated_tree)
+                  #(Model(..m, curr_problem: updated_line), tick(timer))
+                }
+                CostImpossible -> #(
+                  Model(..m, count: Error("impossible input: " <> m.in)),
+                  tick_plus_delay(timer, 1000),
+                )
+                CostVal(tree_min_ct) -> #(
+                  Model(..m, count: case m.count {
+                    Error(_) -> m.count
+                    Ok(ct) -> Ok(ct + tree_min_ct)
+                  }),
+                  tick_plus_delay(timer, 1000),
+                )
+              }
             }
           }
         }
@@ -218,7 +233,7 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     //after solving line wait a sec before going to next line to show solution
     UpdateSolvedLine(timer) -> {
-      case m.curr_problem {
+      let tick_delay_for_next_line = case m.curr_problem {
         OneLineOnOff(
           btns:,
           goal_bits_parity:,
@@ -226,38 +241,23 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           combos:,
           check_combo:,
           check_combo_parity:,
-        ) -> {
-          // case m.problems {
-          //   [] -> {
-          //     #(
-          //       Model(..m, count: case m.count {
-          //         Error(_) -> m.count
-          //         Ok(ct) -> Ok(ct + set.size(check_combo))
-          //       }),
-          //       effect.none(),
-          //     )
-          //   }
-
-          // should only go to UpdateSolvedLine if there are more lines left in problems
-          // awkward split of this + case where tick_plus_delay is called
-          // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
-          let assert [next, ..rest] = m.problems
-          #(
-            Model(
-              in: m.in,
-              curr_problem: next,
-              problems: rest,
-              on_index: m.on_index,
-              count: m.count,
-            ),
-            tick(TimerTick(
-              index: timer.index,
-              millisec: ticks_for_len(num_bits),
-            )),
-          )
-        }
-        OneLineLevel(combos:, tree:) -> panic as "solved line"
+        ) -> ticks_for_len(num_bits)
+        OneLineLevel(combos:, tree:) -> 300
       }
+      // should only go to UpdateSolvedLine if there are more lines left in problems
+      // awkward split of this + case where tick_plus_delay is called
+      // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
+      let assert [next, ..rest] = m.problems
+      #(
+        Model(
+          in: m.in,
+          curr_problem: next,
+          problems: rest,
+          on_index: m.on_index,
+          count: m.count,
+        ),
+        tick(TimerTick(index: timer.index, millisec: tick_delay_for_next_line)),
+      )
     }
   }
 }
@@ -835,7 +835,7 @@ fn view(model: Model) -> Element(Msg) {
 fn view_tree_lines(lt: LevelTree, indent: Int) -> List(Element(Msg)) {
   let level_nums_string =
     string.concat([
-      string.repeat(" ", indent),
+      string.repeat("   ", indent),
       "(",
       lt.levels.num_ctrs
         |> dict.to_list
@@ -854,7 +854,7 @@ fn view_tree_lines(lt: LevelTree, indent: Int) -> List(Element(Msg)) {
   [
     h.text(level_nums_string),
     ..list.fold(from: [], over: lt.children, with: fn(acc, lt_child) {
-      acc |> list.append(view_tree_lines(lt_child.child_tree, indent + 1))
+      list.append(view_tree_lines(lt_child.child_tree, indent + 1), acc)
     })
   ]
 }
