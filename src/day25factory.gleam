@@ -262,7 +262,7 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   }
 }
 
-fn check_zeros_or_ltzero(lt: LevelTree, callback) {
+fn check_zeros_or_ltzero(lt: LevelTree) {
   let level_values =
     lt.levels.num_ctrs
     |> dict.to_list
@@ -278,7 +278,7 @@ fn check_zeros_or_ltzero(lt: LevelTree, callback) {
         |> list.find(fn(n) { n < 0 })
       case elt_lt_zero {
         Ok(_) -> LevelTree(..lt, cost: CostImpossible)
-        Error(_) -> callback()
+        Error(_) -> lt
       }
     }
   }
@@ -303,7 +303,6 @@ fn levels_minus_combo_amt_then_halved(
 }
 
 fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
-  use <- check_zeros_or_ltzero(lt)
   case
     precomputed_parity_combos.cfp
     |> dict.get(lt.levels |> levels_parity)
@@ -369,16 +368,20 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
             })
           let new_children = case missing_or_costunknown {
             Error(_) -> {
-              let new_child =
+              let new_leveltree =
+                LevelTree(
+                  children: [],
+                  cost: CostUnknown,
+                  levels: look_for_levels,
+                )
+              let new_leveltree = check_zeros_or_ltzero(new_leveltree)
+              [
                 LTCost(
                   child_combo_cost: missing_lbc.cost,
-                  child_tree: LevelTree(
-                    children: [],
-                    cost: CostUnknown,
-                    levels: look_for_levels,
-                  ),
-                )
-              [new_child, ..lt.children]
+                  child_tree: new_leveltree,
+                ),
+                ..lt.children
+              ]
             }
             Ok(ch) -> {
               let existing_child_updated_cost =
