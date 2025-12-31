@@ -113,7 +113,7 @@ type Model {
 }
 
 fn init(starting_example) -> #(Model, Effect(Msg)) {
-  next_model(starting_example, 0, LevelM)
+  next_model(starting_example, 0, OnOffM)
 }
 
 // UPDATE ----------------------------------------------------------------------
@@ -126,7 +126,7 @@ type Msg {
   ClockTickedForward(TimerTick)
   UpdateSolvedLine(TimerTick)
   UserEnteredInput(String)
-  UserClickedPower
+  UserSelectedType(M)
   UserClickedReplay
 }
 
@@ -217,7 +217,14 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
       }
     }
-    UserClickedPower -> {
+    UserSelectedType(newtype) -> {
+      case newtype, m.curr_problem {
+        OnOffM, OneLineLevel(_, _) -> next_model(m.in, m.on_index + 1, OnOffM)
+        LevelM, OneLineOnOff(_, _, _, _, _, _) ->
+          next_model(m.in, m.on_index + 1, LevelM)
+        OnOffM, OneLineOnOff(_, _, _, _, _, _) -> #(m, effect.none())
+        LevelM, OneLineLevel(_, _) -> #(m, effect.none())
+      }
       next_model(m.in, m.on_index + 1, case m.curr_problem {
         OneLineLevel(_, _) -> OnOffM
         OneLineOnOff(_, _, _, _, _, _) -> LevelM
@@ -237,21 +244,11 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     //after solving line wait a sec before going to next line to show solution
     UpdateSolvedLine(timer) -> {
-      let tick_delay_for_next_line = case m.curr_problem {
-        OneLineOnOff(
-          btns:,
-          goal_bits_parity:,
-          num_bits:,
-          combos:,
-          check_combo:,
-          check_combo_parity:,
-        ) -> ticks_for_len(num_bits)
-        OneLineLevel(combos:, tree:) -> 300
-      }
       // should only go to UpdateSolvedLine if there are more lines left in problems
       // awkward split of this + case where tick_plus_delay is called
       // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
       let assert [next, ..rest] = m.problems
+      let tick_delay_for_next_line = ticks_for_currline(next)
       #(
         Model(
           in: m.in,
@@ -431,8 +428,20 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
 
 fn next_model(input: String, index: Int, t: M) {
   let m = new_model(input, index, t)
-  case m.curr_problem {
-    OneLineLevel(combos:, tree:) -> #(m, tick(TimerTick(1300, index)))
+  #(m, tick(TimerTick(ticks_for_currline(m.curr_problem), index)))
+}
+
+fn ticks_for_currline(l: OneLine) {
+  case l {
+    OneLineLevel(combos:, tree:) -> {
+      let sum_levels =
+        list.fold(
+          from: 0,
+          over: tree.levels.num_ctrs |> dict.to_list,
+          with: fn(acc, n) { acc + n.1 },
+        )
+      3000 / sum_levels
+    }
     OneLineOnOff(
       btns:,
       goal_bits_parity:,
@@ -440,15 +449,13 @@ fn next_model(input: String, index: Int, t: M) {
       combos:,
       check_combo:,
       check_combo_parity:,
-    ) -> #(m, tick(TimerTick(ticks_for_len(num_bits), index)))
-  }
-}
-
-fn ticks_for_len(num_bits) {
-  let len = list.length(num_bits)
-  case len < 8 {
-    True -> 3000 / { len |> pow_2 }
-    False -> 1
+    ) -> {
+      let len = list.length(num_bits)
+      case len < 8 {
+        True -> 3000 / { len |> pow_2 }
+        False -> 1
+      }
+    }
   }
 }
 
@@ -640,6 +647,10 @@ fn all_combinations(l) {
 // VIEW ------------------------------------------------------------------------
 
 fn view(model: Model) -> Element(Msg) {
+  let on_levels = case model.curr_problem {
+    OneLineLevel(_, _) -> True
+    OneLineOnOff(_, _, _, _, _, _) -> False
+  }
   h.article(
     [
       a.style("background", "#292d3e"),
@@ -688,43 +699,62 @@ fn view(model: Model) -> Element(Msg) {
           ),
         ]
       }),
-      h.div([], [
-        h.button(
-          [
-            event.on_click(UserClickedPower),
-            a.style("width", "115px"),
-            a.style("padding", "3px"),
-          ],
-          [
-            h.text(case model.curr_problem {
-              OneLineLevel(_, _) -> "set indicators"
-              OneLineOnOff(_, _, _, _, _, _) -> "set joltage levels"
-            }),
-          ],
-        ),
-        h.button(
-          [
-            event.on_click(UserClickedReplay),
-            a.style("width", "fit-content"),
-            a.style("margin", "5px"),
-            a.style("padding", "3px"),
-          ],
-          [
-            h.text("Replay"),
-          ],
-        ),
-        h.text(
-          // case model.curr_b {
-          //   Normal(_) -> "split count: "
-          //   Quantum(_) -> "timeline count: "
-          // }
-          "min press sum: "
-          <> case model.count {
-            Ok(n) -> n |> int.to_string
-            Error(s) -> s
-          },
-        ),
-      ]),
+      h.div(
+        [
+          a.style("display", "flex"),
+          a.style("gap", "15px"),
+          a.style("align-items", "end"),
+        ],
+        [
+          h.div(
+            [
+              a.style("display", "flex"),
+              a.style("flex-direction", "column"),
+            ],
+            [
+              h.div([], [
+                h.input([
+                  a.type_("radio"),
+                  a.id("lights"),
+                  a.checked(!on_levels),
+                  event.on_click(UserSelectedType(OnOffM)),
+                ]),
+                h.label([a.for("lights")], [h.text("indicator lights")]),
+              ]),
+              h.div([], [
+                h.input([
+                  a.type_("radio"),
+                  a.id("levels"),
+                  a.checked(on_levels),
+                  event.on_click(UserSelectedType(LevelM)),
+                ]),
+                h.label([a.for("levels")], [h.text("joltage levels")]),
+              ]),
+            ],
+          ),
+          h.button(
+            [
+              event.on_click(UserClickedReplay),
+              a.style("width", "fit-content"),
+              a.style("padding", "3px"),
+            ],
+            [
+              h.text("Replay"),
+            ],
+          ),
+          h.text(
+            // case model.curr_b {
+            //   Normal(_) -> "split count: "
+            //   Quantum(_) -> "timeline count: "
+            // }
+            "min press sum: "
+            <> case model.count {
+              Ok(n) -> n |> int.to_string
+              Error(s) -> s
+            },
+          ),
+        ],
+      ),
       h.textarea(
         [
           a.id("input"),
@@ -844,35 +874,78 @@ fn view(model: Model) -> Element(Msg) {
               ),
           )
         }
-        OneLineLevel(_, tree:) -> h.pre([], tree |> view_tree_lines(0))
+        OneLineLevel(_, tree:) -> h.pre([], Root(tree) |> view_tree_lines(0))
       },
     ],
   )
 }
 
-fn view_tree_lines(lt: LevelTree, indent: Int) -> List(Element(Msg)) {
-  let level_nums_string =
-    string.concat([
-      string.repeat("   ", indent),
-      "(",
-      lt.levels.num_ctrs
-        |> dict.to_list
-        |> list.sort(fn(d1, d2) { int.compare(d1.0, d2.0) })
-        |> list.map(fn(tpl) { tpl.1 |> int.to_string })
-        |> string.join(","),
-      ") ",
-      case lt.cost {
-        CostUnknown -> "?"
-        CostImpossible -> "∞"
-        CostVal(v) -> v |> int.to_string
-      },
-      "\n",
-    ])
+type TreeOrCost {
+  Child(LTCost)
+  Root(LevelTree)
+}
+
+fn view_tree_lines(node: TreeOrCost, indent: Int) -> List(Element(Msg)) {
+  let #(lt, combo_cost) = case node {
+    Child(ltc) -> #(
+      ltc.child_tree,
+      ltc.to_child.buttons_used |> int.to_string <> " + 2 * ",
+    )
+    Root(lt) -> #(lt, "")
+  }
+  let level_nums_string_before =
+    h.text(string.concat([string.repeat("      ", indent), combo_cost]))
+  let level_nums_string_color =
+    h.span(
+      [
+        a.style("color", case lt.cost {
+          CostImpossible -> "#FF9999"
+          CostUnknown -> "#FFFF99"
+          CostVal(_) -> "#99FF99"
+        }),
+      ],
+      [
+        h.text(
+          string.concat([
+            "{",
+            lt.levels.num_ctrs
+              |> dict.to_list
+              |> list.sort(fn(d1, d2) { int.compare(d1.0, d2.0) })
+              |> list.map(fn(tpl) { tpl.1 |> int.to_string })
+              |> string.join(","),
+            "}",
+            " = ",
+            case lt.cost {
+              CostUnknown -> "?"
+              CostImpossible -> "∞"
+              CostVal(v) -> v |> int.to_string
+            },
+          ]),
+        ),
+      ],
+    )
+  let level_nums_string_after =
+    h.text(
+      string.concat([
+        case lt.cost {
+          CostUnknown -> " = min of"
+          CostImpossible -> ""
+          CostVal(v) ->
+            case v {
+              0 -> ""
+              _ -> " = min of"
+            }
+        },
+        "\n",
+      ]),
+    )
 
   [
-    h.text(level_nums_string),
+    level_nums_string_before,
+    level_nums_string_color,
+    level_nums_string_after,
     ..list.fold(from: [], over: lt.children, with: fn(acc, lt_child) {
-      list.append(view_tree_lines(lt_child.child_tree, indent + 1), acc)
+      list.append(view_tree_lines(Child(lt_child), indent + 1), acc)
     })
   ]
 }
