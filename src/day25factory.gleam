@@ -165,6 +165,7 @@ type Model {
     onoff_or_level_input: M,
     cache_enabled: Bool,
     set_speed: Option(Float),
+    flip_tree: Bool,
     in: String,
     out: Result(ModelValid, String),
   )
@@ -177,6 +178,7 @@ fn init(starting_example) -> #(Model, Effect(Msg)) {
       onoff_or_level_input: OnOffM,
       cache_enabled: False,
       set_speed: None,
+      flip_tree: False,
       in: starting_example,
       out: Error("initial input not loaded"),
     )
@@ -198,6 +200,8 @@ type Msg {
   UserSwitchedCache
   UserSwitchedDefaultspeed
   UserSetSpeed(String)
+  UserClickedStep
+  UserFlippedTree
 }
 
 fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -249,7 +253,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                                 }),
                               ),
                             ),
-                            tick_plus_delay(timer, 1000),
+                            tick_plus_delay(timer, 1000, maybevalid.set_speed),
                           )
                         }
                       }
@@ -276,7 +280,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                                 ),
                               ),
                             ),
-                            tick(timer),
+                            tick(timer, maybevalid.set_speed),
                           )
                         }
                         [] -> {
@@ -302,7 +306,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           ..maybevalid,
                           out: Ok(ModelValid(..m, curr_problem: updated_line)),
                         ),
-                        tick(timer),
+                        tick(timer, maybevalid.set_speed),
                       )
                     }
                     CostImpossible -> #(
@@ -315,7 +319,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           ),
                         ),
                       ),
-                      tick_plus_delay(timer, 1000),
+                      tick_plus_delay(timer, 1000, maybevalid.set_speed),
                     )
                     CostVal(tree_min_ct) -> #(
                       Model(
@@ -327,7 +331,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           }),
                         ),
                       ),
-                      tick_plus_delay(timer, 1000),
+                      tick_plus_delay(timer, 1000, maybevalid.set_speed),
                     )
                   }
                 }
@@ -378,8 +382,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
           case m.problems {
             [next, ..rest] -> {
-              let tick_delay_for_next_line =
-                ticks_for_currline(next, maybevalid.set_speed)
+              let tick_delay_for_next_line = ticks_for_currline(next)
               #(
                 Model(
                   ..maybevalid,
@@ -389,10 +392,13 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                     count: m.count,
                   )),
                 ),
-                tick(TimerTick(
-                  index: timer.index,
-                  millisec: tick_delay_for_next_line,
-                )),
+                tick(
+                  TimerTick(
+                    index: timer.index,
+                    millisec: tick_delay_for_next_line,
+                  ),
+                  maybevalid.set_speed,
+                ),
               )
             }
             [] -> #(maybevalid, effect.none())
@@ -422,6 +428,11 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(s) -> #(Model(..maybevalid, set_speed: Some(s)), effect.none())
       }
     }
+    UserClickedStep -> todo
+    UserFlippedTree -> #(
+      Model(..maybevalid, flip_tree: !maybevalid.flip_tree),
+      effect.none(),
+    )
   }
 }
 
@@ -605,16 +616,26 @@ fn lt_one_step(
   }
 }
 
-fn tick_plus_delay(t: TimerTick, delay: Int) -> Effect(Msg) {
+fn tick_plus_delay(
+  t: TimerTick,
+  delay: Int,
+  set_speed: Option(Float),
+) -> Effect(Msg) {
   use dispatch <- effect.from
-  use <- set_timeout(t.millisec + delay)
-
+  let spd = case set_speed {
+    Some(spd) -> spd |> speed_float_to_step_millisec
+    None -> t.millisec
+  }
+  use <- set_timeout(delay + spd)
   dispatch(UpdateSolvedLine(t))
 }
 
-fn tick(t: TimerTick) -> Effect(Msg) {
+fn tick(t: TimerTick, set_speed: Option(Float)) -> Effect(Msg) {
   use dispatch <- effect.from
-  use <- set_timeout(t.millisec)
+  use <- set_timeout(case set_speed {
+    Some(spd) -> spd |> speed_float_to_step_millisec
+    None -> t.millisec
+  })
 
   dispatch(ClockTickedForward(t))
 }
@@ -624,35 +645,31 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
   Nil
 }
 
-fn ticks_for_currline(l: OneLine, set_speed: Option(Float)) {
-  case set_speed {
-    Some(spd) -> spd |> speed_float_to_step_millisec
-    None ->
-      case l {
-        OneLineLevel(combos:, tree:, cost_for_levels:) -> {
-          let sum_cfp =
-            list.fold(
-              from: 0,
-              over: combos.cfp |> dict.values,
-              with: fn(acc, num_combos) { acc + dict.size(num_combos.combo) },
-            )
-          int.min(1000, 300_000 / { sum_cfp * sum_cfp })
-        }
-        OneLineOnOff(
-          btns:,
-          goal_bits_parity:,
-          num_bits:,
-          combos:,
-          check_combo:,
-          check_combo_parity:,
-        ) -> {
-          let len = list.length(num_bits)
-          case len < 8 {
-            True -> 3000 / { len |> pow_2 }
-            False -> 1
-          }
-        }
+fn ticks_for_currline(l: OneLine) {
+  case l {
+    OneLineLevel(combos:, tree:, cost_for_levels:) -> {
+      let sum_cfp =
+        list.fold(
+          from: 0,
+          over: combos.cfp |> dict.values,
+          with: fn(acc, num_combos) { acc + dict.size(num_combos.combo) },
+        )
+      int.min(1000, 300_000 / { sum_cfp * sum_cfp })
+    }
+    OneLineOnOff(
+      btns:,
+      goal_bits_parity:,
+      num_bits:,
+      combos:,
+      check_combo:,
+      check_combo_parity:,
+    ) -> {
+      let len = list.length(num_bits)
+      case len < 8 {
+        True -> 3000 / { len |> pow_2 }
+        False -> 1
       }
+    }
   }
 }
 
@@ -660,10 +677,8 @@ fn ticks_for_currline(l: OneLine, set_speed: Option(Float)) {
 /// also updates index, so new model's ticks will be received in update and old will be discarded
 fn update_index_model_with_parsed_input(from_model: Model) {
   let input = from_model.in
-  let curr_index = from_model.on_index
   let t = from_model.onoff_or_level_input
   let cache_enabled = from_model.cache_enabled
-  let set_speed = from_model.set_speed
 
   let user_problems =
     input
@@ -851,50 +866,24 @@ fn update_index_model_with_parsed_input(from_model: Model) {
   let parsed_model = case user_problems {
     Error(_) -> todo
     Ok(problems) ->
-      case problems {
+      Model(..from_model, out: case problems {
         [first_problem, ..rest_problems] ->
-          Model(
-            in: input,
-            on_index: curr_index,
-            onoff_or_level_input: t,
-            cache_enabled:,
-            set_speed:,
-            out: Ok(ModelValid(
-              problems: rest_problems,
-              curr_problem: first_problem,
-              count: Ok(0),
-            )),
-          )
-        [] ->
-          Model(
-            in: input,
-            on_index: curr_index,
-            onoff_or_level_input: t,
-            cache_enabled: False,
-            set_speed:,
-            out: Ok(ModelValid(
-              problems: [],
-              curr_problem: OneLineOnOff(
-                btns: [],
-                goal_bits_parity: 0,
-                num_bits: [],
-                combos: [],
-                check_combo: set.new(),
-                check_combo_parity: 0,
-              ),
-              count: Error("empty input (need at least 1 line)"),
-            )),
-          )
-      }
+          Ok(ModelValid(
+            problems: rest_problems,
+            curr_problem: first_problem,
+            count: Ok(0),
+          ))
+        [] -> Error("empty input (need at least one line)")
+      })
   }
   case parsed_model.out {
     Error(_) -> todo
     Ok(m) -> #(
       parsed_model,
-      tick(TimerTick(
-        ticks_for_currline(m.curr_problem, parsed_model.set_speed),
-        parsed_model.on_index,
-      )),
+      tick(
+        TimerTick(ticks_for_currline(m.curr_problem), parsed_model.on_index),
+        parsed_model.set_speed,
+      ),
     )
   }
 }
@@ -960,71 +949,103 @@ fn view(model: Model) -> Element(Msg) {
       h.div(
         [
           a.style("display", "flex"),
+          a.style("flex-direction", "column"),
+        ],
+        [
+          h.div([], [
+            h.input([
+              a.type_("radio"),
+              a.id("levels"),
+              a.checked(case model.onoff_or_level_input {
+                LevelM -> True
+                OnOffM -> False
+              }),
+              event.on_click(UserSelectedType(LevelM)),
+            ]),
+            h.label([a.for("levels")], [h.text("joltage levels")]),
+            h.span(
+              [
+                a.style("margin-left", "15px"),
+                a.title(
+                  "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
+                ),
+              ],
+              [
+                h.input([
+                  a.type_("checkbox"),
+                  a.id("cache"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  a.checked(model.cache_enabled),
+                  event.on_click(UserSwitchedCache),
+                ]),
+                h.label(
+                  [
+                    a.for("cache"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("cache levels")],
+                ),
+              ],
+            ),
+            h.span(
+              [
+                a.style("margin-left", "15px"),
+                a.title(
+                  "As joltage level tree lines are calculated, display them on top of screen instead of bottom.",
+                ),
+              ],
+              [
+                h.input([
+                  a.type_("checkbox"),
+                  a.id("flip"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  a.checked(model.flip_tree),
+                  event.on_click(UserFlippedTree),
+                ]),
+                h.label(
+                  [
+                    a.for("flip"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("new level line at top")],
+                ),
+              ],
+            ),
+          ]),
+          h.div([], [
+            h.input([
+              a.type_("radio"),
+              a.id("lights"),
+              a.checked(case model.onoff_or_level_input {
+                LevelM -> False
+                OnOffM -> True
+              }),
+              event.on_click(UserSelectedType(OnOffM)),
+            ]),
+            h.label([a.for("lights")], [h.text("indicator lights")]),
+          ]),
+        ],
+      ),
+      h.div(
+        [
+          a.style("display", "flex"),
+          a.style("flex-wrap", "wrap"),
           a.style("gap", "15px"),
           a.style("align-items", "end"),
         ],
         [
-          h.div(
-            [
-              a.style("display", "flex"),
-              a.style("flex-direction", "column"),
-            ],
-            [
-              h.div([], [
-                h.input([
-                  a.type_("radio"),
-                  a.id("levels"),
-                  a.checked(case model.onoff_or_level_input {
-                    LevelM -> True
-                    OnOffM -> False
-                  }),
-                  event.on_click(UserSelectedType(LevelM)),
-                ]),
-                h.label([a.for("levels")], [h.text("joltage levels")]),
-                h.span(
-                  [
-                    a.title(
-                      "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
-                    ),
-                  ],
-                  [
-                    h.input([
-                      a.type_("checkbox"),
-                      a.id("cache"),
-                      a.disabled(case model.onoff_or_level_input {
-                        LevelM -> False
-                        OnOffM -> True
-                      }),
-                      a.checked(model.cache_enabled),
-                      event.on_click(UserSwitchedCache),
-                    ]),
-                    h.label(
-                      [
-                        a.for("cache"),
-                        a.style("opacity", case model.onoff_or_level_input {
-                          LevelM -> "1.0"
-                          OnOffM -> "0.3"
-                        }),
-                      ],
-                      [h.text("cache levels")],
-                    ),
-                  ],
-                ),
-              ]),
-              h.div([], [
-                h.input([
-                  a.type_("radio"),
-                  a.id("lights"),
-                  a.checked(case model.onoff_or_level_input {
-                    LevelM -> False
-                    OnOffM -> True
-                  }),
-                  event.on_click(UserSelectedType(OnOffM)),
-                ]),
-                h.label([a.for("lights")], [h.text("indicator lights")]),
-              ]),
-            ],
-          ),
           h.div(
             [
               a.style("display", "flex"),
@@ -1050,7 +1071,7 @@ fn view(model: Model) -> Element(Msg) {
                 h.span(
                   [
                     a.title(
-                      "The default step time is roughly based on input size for each line. However you can uncheck this to manually set speed with slider.",
+                      "The default step time is roughly a shorter duration for lines that look like they'll take more steps. However you can check this to manually set speed with slider.",
                     ),
                   ],
                   [
@@ -1108,12 +1129,19 @@ fn view(model: Model) -> Element(Msg) {
             Ok(m) -> {
               h.span([], [
                 h.text("min press sum: "),
-                h.span([a.style("font-size", "1.4em")], [
-                  h.text(case m.count {
-                    Ok(n) -> n |> int.to_string
-                    Error(s) -> s
-                  }),
-                ]),
+                h.span(
+                  [
+                    a.style("font-size", "1.4em"),
+                    a.style("width", "5ch"),
+                    a.style("display", "inline-block"),
+                  ],
+                  [
+                    h.text(case m.count {
+                      Ok(n) -> n |> int.to_string
+                      Error(s) -> s
+                    }),
+                  ],
+                ),
               ])
             }
           },
@@ -1246,7 +1274,7 @@ fn view(model: Model) -> Element(Msg) {
               )
             }
             OneLineLevel(_, tree, _) ->
-              h.pre([], Root(tree) |> view_tree_lines(0))
+              h.pre([], Root(tree) |> view_tree_lines(0, model.flip_tree))
           }
       },
     ],
@@ -1258,7 +1286,11 @@ type TreeOrCost {
   Root(LevelTree)
 }
 
-fn view_tree_lines(node: TreeOrCost, indent: Int) -> List(Element(Msg)) {
+fn view_tree_lines(
+  node: TreeOrCost,
+  indent: Int,
+  flip_tree: Bool,
+) -> List(Element(Msg)) {
   let #(lt, combo_cost) = case node {
     Child(ltc) -> #(
       ltc.child_tree,
@@ -1326,7 +1358,18 @@ fn view_tree_lines(node: TreeOrCost, indent: Int) -> List(Element(Msg)) {
     level_nums_string_color,
     level_nums_string_after,
     ..list.fold(from: [], over: lt.children, with: fn(acc, lt_child) {
-      list.append(view_tree_lines(Child(lt_child), indent + 1), acc)
+      case flip_tree {
+        False ->
+          list.append(
+            view_tree_lines(Child(lt_child), indent + 1, flip_tree),
+            acc,
+          )
+        True ->
+          list.append(
+            acc,
+            view_tree_lines(Child(lt_child), indent + 1, flip_tree),
+          )
+      }
     })
   ]
 }
