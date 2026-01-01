@@ -40,8 +40,13 @@ fn parse_num_to_float(s: String) {
 }
 
 fn speed_float_to_sec(slider_value: Float) {
-  let assert Ok(n) = int.power(10, slider_value)
-  n
+  case slider_value {
+    -3.001 -> 0.0
+    _ -> {
+      let assert Ok(n) = int.power(10, slider_value)
+      n
+    }
+  }
 }
 
 fn speed_float_to_step_millisec(slider_value: Float) {
@@ -159,13 +164,20 @@ type M {
   LevelM
 }
 
+type Index {
+  Index(input: Int, line: Int)
+}
+
 type Model {
   Model(
     on_index: Int,
     onoff_or_level_input: M,
     cache_enabled: Bool,
     set_speed: Option(Float),
+    default_speed_ms: Int,
     flip_tree: Bool,
+    pause_answer: Bool,
+    play: Bool,
     in: String,
     out: Result(ModelValid, String),
   )
@@ -178,7 +190,10 @@ fn init(starting_example) -> #(Model, Effect(Msg)) {
       onoff_or_level_input: OnOffM,
       cache_enabled: False,
       set_speed: None,
+      default_speed_ms: 0,
       flip_tree: False,
+      pause_answer: True,
+      play: True,
       in: starting_example,
       out: Error("initial input not loaded"),
     )
@@ -193,7 +208,6 @@ type TimerTick {
 
 type Msg {
   ClockTickedForward(TimerTick)
-  UpdateSolvedLine(TimerTick)
   UserEnteredInput(String)
   UserSelectedType(M)
   UserClickedReplay
@@ -201,7 +215,9 @@ type Msg {
   UserSwitchedDefaultspeed
   UserSetSpeed(String)
   UserClickedStep
+  UserSwitchedPauseanswer
   UserFlippedTree
+  UserSwitchedPlay
 }
 
 fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -226,37 +242,12 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 ) -> {
                   case check_combo_parity == goal_bits_parity {
                     True -> {
-                      //this case to check if end sort of awkwardly both here +
-                      case m.problems {
-                        [] -> {
-                          #(
-                            Model(
-                              ..maybevalid,
-                              out: Ok(
-                                ModelValid(..m, count: case m.count {
-                                  Error(_) -> m.count
-                                  Ok(ct) -> Ok(ct + set.size(check_combo))
-                                }),
-                              ),
-                            ),
-                            effect.none(),
-                          )
+                      add_count_go_next_line(maybevalid, m, timer, fn(m) {
+                        case m.count {
+                          Error(_) -> m.count
+                          Ok(ct) -> Ok(ct + set.size(check_combo))
                         }
-                        [_, ..] -> {
-                          #(
-                            Model(
-                              ..maybevalid,
-                              out: Ok(
-                                ModelValid(..m, count: case m.count {
-                                  Error(_) -> m.count
-                                  Ok(ct) -> Ok(ct + set.size(check_combo))
-                                }),
-                              ),
-                            ),
-                            tick_plus_delay(timer, 1000, maybevalid.set_speed),
-                          )
-                        }
-                      }
+                      })
                     }
                     False -> {
                       case combos {
@@ -309,30 +300,19 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                         tick(timer, maybevalid.set_speed),
                       )
                     }
-                    CostImpossible -> #(
-                      Model(
-                        ..maybevalid,
-                        out: Ok(
-                          ModelValid(
-                            ..m,
-                            count: Error("impossible input: " <> maybevalid.in),
-                          ),
-                        ),
-                      ),
-                      tick_plus_delay(timer, 1000, maybevalid.set_speed),
-                    )
-                    CostVal(tree_min_ct) -> #(
-                      Model(
-                        ..maybevalid,
-                        out: Ok(
-                          ModelValid(..m, count: case m.count {
-                            Error(_) -> m.count
-                            Ok(ct) -> Ok(ct + tree_min_ct)
-                          }),
-                        ),
-                      ),
-                      tick_plus_delay(timer, 1000, maybevalid.set_speed),
-                    )
+                    CostImpossible -> {
+                      add_count_go_next_line(maybevalid, m, timer, fn(_) {
+                        Error("impossible input: " <> maybevalid.in)
+                      })
+                    }
+                    CostVal(tree_min_ct) -> {
+                      add_count_go_next_line(maybevalid, m, timer, fn(m) {
+                        case m.count {
+                          Error(_) -> m.count
+                          Ok(ct) -> Ok(ct + tree_min_ct)
+                        }
+                      })
+                    }
                   }
                 }
               }
@@ -345,7 +325,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case newtype == maybevalid.onoff_or_level_input {
         True -> #(maybevalid, effect.none())
         False ->
-          update_index_model_with_parsed_input(
+          echo update_index_model_with_parsed_input(
             Model(
               ..maybevalid,
               on_index: maybevalid.on_index + 1,
@@ -371,48 +351,21 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       update_index_model_with_parsed_input(
         Model(..maybevalid, in: input, on_index: maybevalid.on_index + 1),
       )
-    //after solving line wait a sec before going to next line to show solution
-    UpdateSolvedLine(timer) ->
-      case maybevalid.out {
-        Error(_) -> #(maybevalid, effect.none())
-        //error case could be panic and would be fine? if no problem will never solve problem
-        Ok(m) -> {
-          // should only go to UpdateSolvedLine if there are more lines left in problems
-          // awkward split of this + case where tick_plus_delay is called
-          // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
-          case m.problems {
-            [next, ..rest] -> {
-              let tick_delay_for_next_line = ticks_for_currline(next)
-              #(
-                Model(
-                  ..maybevalid,
-                  out: Ok(ModelValid(
-                    curr_problem: next,
-                    problems: rest,
-                    count: m.count,
-                  )),
-                ),
-                tick(
-                  TimerTick(
-                    index: timer.index,
-                    millisec: tick_delay_for_next_line,
-                  ),
-                  maybevalid.set_speed,
-                ),
-              )
-            }
-            [] -> #(maybevalid, effect.none())
-          }
-        }
-      }
     // note changing speed does not restart the run
     // everything else does by calling update_index_model_with_parsed_input
+    // setting speed does update index so that when you go from slow to fast it steps again immediately, but does not re parse input
     UserSwitchedDefaultspeed -> #(
       Model(..maybevalid, set_speed: case maybevalid.set_speed {
         Some(_) -> None
         None -> Some(0.0)
       }),
-      effect.none(),
+      tick(
+        TimerTick(
+          millisec: maybevalid.default_speed_ms,
+          index: maybevalid.on_index + 1,
+        ),
+        None,
+      ),
     )
     UserSetSpeed(spd) -> {
       case spd |> parse_num_to_float {
@@ -425,14 +378,42 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ),
           effect.none(),
         )
-        Ok(s) -> #(Model(..maybevalid, set_speed: Some(s)), effect.none())
+        Ok(s) -> #(
+          Model(
+            ..maybevalid,
+            on_index: maybevalid.on_index + 1,
+            set_speed: Some(s),
+          ),
+          //if user manually set some speed, won't use the model default ms
+          tick(
+            TimerTick(millisec: -123, index: maybevalid.on_index + 1),
+            Some(s),
+          ),
+        )
       }
     }
     UserClickedStep -> todo
+    UserSwitchedPauseanswer -> todo
     UserFlippedTree -> #(
       Model(..maybevalid, flip_tree: !maybevalid.flip_tree),
       effect.none(),
     )
+    UserSwitchedPlay -> {
+      let new_m =
+        Model(
+          ..maybevalid,
+          play: !maybevalid.play,
+          on_index: maybevalid.on_index + 1,
+        )
+      #(new_m, case new_m.play {
+        True ->
+          tick(
+            TimerTick(millisec: new_m.default_speed_ms, index: new_m.on_index),
+            new_m.set_speed,
+          )
+        False -> effect.none()
+      })
+    }
   }
 }
 
@@ -616,20 +597,6 @@ fn lt_one_step(
   }
 }
 
-fn tick_plus_delay(
-  t: TimerTick,
-  delay: Int,
-  set_speed: Option(Float),
-) -> Effect(Msg) {
-  use dispatch <- effect.from
-  let spd = case set_speed {
-    Some(spd) -> spd |> speed_float_to_step_millisec
-    None -> t.millisec
-  }
-  use <- set_timeout(delay + spd)
-  dispatch(UpdateSolvedLine(t))
-}
-
 fn tick(t: TimerTick, set_speed: Option(Float)) -> Effect(Msg) {
   use dispatch <- effect.from
   use <- set_timeout(case set_speed {
@@ -669,6 +636,40 @@ fn ticks_for_currline(l: OneLine) {
         True -> 3000 / { len |> pow_2 }
         False -> 1
       }
+    }
+  }
+}
+
+fn add_count_go_next_line(
+  maybevalid: Model,
+  m: ModelValid,
+  timer: TimerTick,
+  add_count,
+) {
+  case m.problems {
+    [] -> {
+      #(
+        Model(..maybevalid, out: Ok(ModelValid(..m, count: add_count(m)))),
+        effect.none(),
+      )
+    }
+    [next, ..rest] -> {
+      let tick_delay_for_next_line = ticks_for_currline(next)
+      #(
+        Model(
+          ..maybevalid,
+          default_speed_ms: tick_delay_for_next_line,
+          out: Ok(ModelValid(
+            curr_problem: next,
+            problems: rest,
+            count: add_count(m),
+          )),
+        ),
+        tick(
+          TimerTick(index: timer.index, millisec: tick_delay_for_next_line),
+          maybevalid.set_speed,
+        ),
+      )
     }
   }
 }
@@ -865,7 +866,8 @@ fn update_index_model_with_parsed_input(from_model: Model) {
     })
   let parsed_model = case user_problems {
     Error(_) -> todo
-    Ok(problems) ->
+    Ok(problems) -> {
+      echo problems |> list.length
       Model(..from_model, out: case problems {
         [first_problem, ..rest_problems] ->
           Ok(ModelValid(
@@ -875,16 +877,20 @@ fn update_index_model_with_parsed_input(from_model: Model) {
           ))
         [] -> Error("empty input (need at least one line)")
       })
+    }
   }
   case parsed_model.out {
     Error(_) -> todo
-    Ok(m) -> #(
-      parsed_model,
-      tick(
-        TimerTick(ticks_for_currline(m.curr_problem), parsed_model.on_index),
-        parsed_model.set_speed,
-      ),
-    )
+    Ok(m) -> {
+      let new_line_speed = ticks_for_currline(m.curr_problem)
+      #(
+        Model(..parsed_model, default_speed_ms: new_line_speed),
+        tick(
+          TimerTick(new_line_speed, parsed_model.on_index),
+          parsed_model.set_speed,
+        ),
+      )
+    }
   }
 }
 
@@ -922,7 +928,7 @@ fn view(model: Model) -> Element(Msg) {
               "https://github.com/D-matz/day25factory/blob/main/src/day25factory.gleam",
             ),
           ],
-          [h.text("(source)")],
+          [h.text("[source]")],
         ),
       ]),
       h.p([], case model.onoff_or_level_input {
@@ -967,7 +973,7 @@ fn view(model: Model) -> Element(Msg) {
               [
                 a.style("margin-left", "15px"),
                 a.title(
-                  "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
+                  "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing. (un)checking this restarts everything to (not) build cached levels.",
                 ),
               ],
               [
@@ -1088,7 +1094,7 @@ fn view(model: Model) -> Element(Msg) {
                       [
                         a.for("defaultspeed"),
                       ],
-                      [h.text("manual speed ")],
+                      [h.text("manual step time ")],
                     ),
                     h.span(
                       [
@@ -1112,6 +1118,17 @@ fn view(model: Model) -> Element(Msg) {
               ]),
             ],
           ),
+          h.span(
+            [
+              a.title(
+                "When finishing a line, delay a bit to show answer before starting next line.",
+              ),
+            ],
+            [
+              h.input([a.type_("checkbox"), a.id("pauseanswer")]),
+              h.label([a.for("pauseanswer")], [h.text("delay on answer")]),
+            ],
+          ),
           h.button(
             [
               event.on_click(UserClickedReplay),
@@ -1120,6 +1137,29 @@ fn view(model: Model) -> Element(Msg) {
             ],
             [
               h.text("replay"),
+            ],
+          ),
+          h.button(
+            [
+              event.on_click(UserClickedStep),
+              a.style("width", "fit-content"),
+              a.style("padding", "3px"),
+            ],
+            [
+              h.text("step"),
+            ],
+          ),
+          h.button(
+            [
+              event.on_click(UserSwitchedPlay),
+              a.style("width", "fit-content"),
+              a.style("padding", "3px"),
+            ],
+            [
+              case model.play {
+                True -> h.text("pause")
+                False -> h.text("play")
+              },
             ],
           ),
           case model.out {
