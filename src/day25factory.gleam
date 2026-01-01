@@ -164,19 +164,15 @@ type M {
   LevelM
 }
 
-type Index {
-  Index(input: Int, line: Int)
-}
-
 type Model {
   Model(
     on_index: Int,
+    all_done: Bool,
     onoff_or_level_input: M,
     cache_enabled: Bool,
     set_speed: Option(Float),
     default_speed_ms: Int,
     flip_tree: Bool,
-    pause_answer: Bool,
     play: Bool,
     in: String,
     out: Result(ModelValid, String),
@@ -187,12 +183,12 @@ fn init(starting_example) -> #(Model, Effect(Msg)) {
   let fake_starting_model_without_input_loaded =
     Model(
       on_index: 0,
+      all_done: False,
       onoff_or_level_input: OnOffM,
       cache_enabled: False,
       set_speed: None,
       default_speed_ms: 0,
       flip_tree: False,
-      pause_answer: True,
       play: True,
       in: starting_example,
       out: Error("initial input not loaded"),
@@ -215,7 +211,6 @@ type Msg {
   UserSwitchedDefaultspeed
   UserSetSpeed(String)
   UserClickedStep
-  UserSwitchedPauseanswer
   UserFlippedTree
   UserSwitchedPlay
 }
@@ -325,7 +320,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case newtype == maybevalid.onoff_or_level_input {
         True -> #(maybevalid, effect.none())
         False ->
-          echo update_index_model_with_parsed_input(
+          update_index_model_with_parsed_input(
             Model(
               ..maybevalid,
               on_index: maybevalid.on_index + 1,
@@ -393,7 +388,6 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     }
     UserClickedStep -> todo
-    UserSwitchedPauseanswer -> todo
     UserFlippedTree -> #(
       Model(..maybevalid, flip_tree: !maybevalid.flip_tree),
       effect.none(),
@@ -649,7 +643,15 @@ fn add_count_go_next_line(
   case m.problems {
     [] -> {
       #(
-        Model(..maybevalid, out: Ok(ModelValid(..m, count: add_count(m)))),
+        case maybevalid.all_done {
+          True -> maybevalid
+          False ->
+            Model(
+              ..maybevalid,
+              all_done: True,
+              out: Ok(ModelValid(..m, count: add_count(m))),
+            )
+        },
         effect.none(),
       )
     }
@@ -867,8 +869,7 @@ fn update_index_model_with_parsed_input(from_model: Model) {
   let parsed_model = case user_problems {
     Error(_) -> todo
     Ok(problems) -> {
-      echo problems |> list.length
-      Model(..from_model, out: case problems {
+      Model(..from_model, all_done: False, out: case problems {
         [first_problem, ..rest_problems] ->
           Ok(ModelValid(
             problems: rest_problems,
@@ -1116,17 +1117,6 @@ fn view(model: Model) -> Element(Msg) {
                   ],
                 ),
               ]),
-            ],
-          ),
-          h.span(
-            [
-              a.title(
-                "When finishing a line, delay a bit to show answer before starting next line.",
-              ),
-            ],
-            [
-              h.input([a.type_("checkbox"), a.id("pauseanswer")]),
-              h.label([a.for("pauseanswer")], [h.text("delay on answer")]),
             ],
           ),
           h.button(
