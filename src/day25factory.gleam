@@ -151,19 +151,20 @@ type OneLine {
   )
 }
 
-type ModelValid {
-  ModelValid(curr_problem: OneLine)
-}
-
 type M {
   OnOffM
   LevelM
+}
+
+type CostColors {
+  CostColors(unknown: String, impossible: String, val: String)
 }
 
 type Model {
   Model(
     on_index: Int,
     all_done: Bool,
+    colors: CostColors,
     onoff_or_level_input: M,
     cache_enabled: Bool,
     set_speed: Option(Float),
@@ -173,7 +174,7 @@ type Model {
     in: String,
     problems: List(String),
     count: Result(Int, String),
-    out: Result(ModelValid, String),
+    out: Result(OneLine, String),
   )
 }
 
@@ -182,6 +183,11 @@ fn init(starting_example) -> #(Model, Effect(Msg)) {
     Model(
       on_index: 0,
       all_done: False,
+      colors: CostColors(
+        impossible: "#FF9999",
+        unknown: "#FFFF99",
+        val: "#99FF99",
+      ),
       onoff_or_level_input: OnOffM,
       cache_enabled: False,
       set_speed: None,
@@ -213,6 +219,9 @@ type Msg {
   UserClickedStep
   UserFlippedTree
   UserSwitchedPlay
+  UserSetUnknowncolor(String)
+  UserSetImpossiblecolor(String)
+  UserSetCalculatedcolor(String)
 }
 
 fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -226,7 +235,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           case timer.index == maybevalid.on_index {
             False -> #(maybevalid, effect.none())
             True -> {
-              case m.curr_problem {
+              case m {
                 OneLineOnOff(
                   btns:,
                   goal_bits_parity:,
@@ -258,12 +267,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           #(
                             Model(
                               ..maybevalid,
-                              out: Ok(
-                                ModelValid(
-                                  ..m,
-                                  curr_problem: curr_problem_next_combo,
-                                ),
-                              ),
+                              out: Ok(curr_problem_next_combo),
                             ),
                             tick(timer, maybevalid.set_speed),
                           )
@@ -287,10 +291,7 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           cost_for_levels: new_cache,
                         )
                       #(
-                        Model(
-                          ..maybevalid,
-                          out: Ok(ModelValid(..m, curr_problem: updated_line)),
-                        ),
+                        Model(..maybevalid, out: Ok(updated_line)),
                         tick(timer, maybevalid.set_speed),
                       )
                     }
@@ -405,6 +406,21 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> effect.none()
       })
     }
+    UserSetUnknowncolor(rgb) -> #(
+      Model(..maybevalid, colors: CostColors(..maybevalid.colors, unknown: rgb)),
+      effect.none(),
+    )
+    UserSetImpossiblecolor(rgb) -> #(
+      Model(
+        ..maybevalid,
+        colors: CostColors(..maybevalid.colors, impossible: rgb),
+      ),
+      effect.none(),
+    )
+    UserSetCalculatedcolor(rgb) -> #(
+      Model(..maybevalid, colors: CostColors(..maybevalid.colors, val: rgb)),
+      effect.none(),
+    )
   }
 }
 
@@ -651,8 +667,7 @@ fn add_count_go_next_line(maybevalid: Model, timer_index: Int, add_count) {
         )
       case next {
         Ok(valid_next_problem) -> {
-          let tick_delay_for_next_line =
-            ticks_for_currline(valid_next_problem.curr_problem)
+          let tick_delay_for_next_line = ticks_for_currline(valid_next_problem)
           #(
             Model(
               ..maybevalid,
@@ -688,7 +703,7 @@ fn parse_line(
   line: String,
   cache_enabled: Bool,
   t: M,
-) -> Result(ModelValid, String) {
+) -> Result(OneLine, String) {
   let ret = case line |> string.split("] ") {
     [] -> Error("err 1")
     [goal, ..rest] -> {
@@ -862,7 +877,7 @@ fn parse_line(
     }
   }
   case ret {
-    Ok(o) -> Ok(ModelValid(curr_problem: o))
+    Ok(o) -> Ok(o)
     Error(e) -> Error(e)
   }
 }
@@ -1002,6 +1017,79 @@ fn view(model: Model) -> Element(Msg) {
                 ),
               ],
             ),
+            h.span(
+              [
+                a.style("margin-left", "15px"),
+                a.title(
+                  "Set colors for joltage levels unknown, impossible, and calculated.",
+                ),
+              ],
+              [
+                h.input([
+                  a.type_("color"),
+                  a.value(model.colors.unknown),
+                  a.id("u"),
+                  a.style("margin-left", "3px"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  event.on_input(UserSetUnknowncolor),
+                ]),
+                h.label(
+                  [
+                    a.for("u"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("unknown")],
+                ),
+                h.input([
+                  a.type_("color"),
+                  a.value(model.colors.val),
+                  a.id("c"),
+                  a.style("margin-left", "3px"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  event.on_input(UserSetCalculatedcolor),
+                ]),
+                h.label(
+                  [
+                    a.for("c"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("calculated")],
+                ),
+                h.input([
+                  a.type_("color"),
+                  a.value(model.colors.impossible),
+                  a.id("i"),
+                  a.style("margin-left", "3px"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  event.on_input(UserSetImpossiblecolor),
+                ]),
+                h.label(
+                  [
+                    a.for("i"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("impossible")],
+                ),
+              ],
+            ),
           ]),
           h.div([], [
             h.input([
@@ -1094,7 +1182,7 @@ fn view(model: Model) -> Element(Msg) {
           h.button(
             [
               event.on_click(UserClickedReplay),
-              a.style("width", "fit-content"),
+              a.style("width", "4em"),
               a.style("padding", "3px"),
             ],
             [
@@ -1104,7 +1192,7 @@ fn view(model: Model) -> Element(Msg) {
           h.button(
             [
               event.on_click(UserClickedStep),
-              a.style("width", "fit-content"),
+              a.style("width", "4em"),
               a.style("padding", "3px"),
             ],
             [
@@ -1114,7 +1202,7 @@ fn view(model: Model) -> Element(Msg) {
           h.button(
             [
               event.on_click(UserSwitchedPlay),
-              a.style("width", "fit-content"),
+              a.style("width", "4em"),
               a.style("padding", "3px"),
             ],
             [
@@ -1128,13 +1216,12 @@ fn view(model: Model) -> Element(Msg) {
             Error(_) -> {
               h.text("")
             }
-            Ok(m) -> {
+            Ok(_) -> {
               h.span([], [
                 h.text("min press sum: "),
                 h.span(
                   [
                     a.style("font-size", "1.4em"),
-                    a.style("width", "5ch"),
                     a.style("display", "inline-block"),
                   ],
                   [
@@ -1161,7 +1248,7 @@ fn view(model: Model) -> Element(Msg) {
       case model.out {
         Error(input_invalid) -> h.text(input_invalid)
         Ok(m) ->
-          case m.curr_problem {
+          case m {
             OneLineOnOff(
               btns:,
               goal_bits_parity:,
@@ -1276,7 +1363,10 @@ fn view(model: Model) -> Element(Msg) {
               )
             }
             OneLineLevel(_, tree, _) ->
-              h.pre([], Root(tree) |> view_tree_lines(0, model.flip_tree))
+              h.pre(
+                [],
+                Root(tree) |> view_tree_lines(0, model.flip_tree, model.colors),
+              )
           }
       },
     ],
@@ -1292,6 +1382,7 @@ fn view_tree_lines(
   node: TreeOrCost,
   indent: Int,
   flip_tree: Bool,
+  colors: CostColors,
 ) -> List(Element(Msg)) {
   let #(lt, combo_cost) = case node {
     Child(ltc) -> #(
@@ -1306,9 +1397,9 @@ fn view_tree_lines(
     h.span(
       [
         a.style("color", case lt.cost {
-          CostImpossible -> "#FF9999"
-          CostUnknown -> "#FFFF99"
-          CostVal(_) -> "#99FF99"
+          CostImpossible -> colors.impossible
+          CostUnknown -> colors.unknown
+          CostVal(_) -> colors.val
         }),
       ],
       [
@@ -1363,13 +1454,13 @@ fn view_tree_lines(
       case flip_tree {
         False ->
           list.append(
-            view_tree_lines(Child(lt_child), indent + 1, flip_tree),
+            view_tree_lines(Child(lt_child), indent + 1, flip_tree, colors),
             acc,
           )
         True ->
           list.append(
             acc,
-            view_tree_lines(Child(lt_child), indent + 1, flip_tree),
+            view_tree_lines(Child(lt_child), indent + 1, flip_tree, colors),
           )
       }
     })
