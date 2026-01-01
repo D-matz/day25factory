@@ -1,4 +1,5 @@
 import gleam/dict.{type Dict}
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -14,8 +15,38 @@ import lustre/event
 fn pow_2(n: Int) {
   case n {
     0 -> 1
+    1 -> 2
+    2 -> 4
+    3 -> 8
+    4 -> 16
+    5 -> 32
+    6 -> 64
+    7 -> 128
+    8 -> 256
+    9 -> 512
+    10 -> 1024
+    11 -> 2048
+    //who knows if this actually speeds anything up but cant hurt
     _ -> 2 * pow_2(n - 1)
   }
+}
+
+//this is not how std lib works? idk maybe missed something
+fn parse_num_to_float(s: String) {
+  case s |> int.parse {
+    Ok(i) -> Ok(i |> int.to_float)
+    Error(_) -> s |> float.parse
+  }
+}
+
+fn speed_float_to_sec(slider_value: Float) {
+  let assert Ok(n) = int.power(10, slider_value)
+  n
+}
+
+fn speed_float_to_step_millisec(slider_value: Float) {
+  { speed_float_to_sec(slider_value) *. 1000.0 }
+  |> float.round
 }
 
 // set of buttons (each a parity int) converted to parity int
@@ -133,13 +164,23 @@ type Model {
     on_index: Int,
     onoff_or_level_input: M,
     cache_enabled: Bool,
+    set_speed: Option(Float),
     in: String,
     out: Result(ModelValid, String),
   )
 }
 
 fn init(starting_example) -> #(Model, Effect(Msg)) {
-  next_model(starting_example, 0, OnOffM, False)
+  let fake_starting_model_without_input_loaded =
+    Model(
+      on_index: 0,
+      onoff_or_level_input: OnOffM,
+      cache_enabled: False,
+      set_speed: None,
+      in: starting_example,
+      out: Error("initial input not loaded"),
+    )
+  update_index_model_with_parsed_input(fake_starting_model_without_input_loaded)
 }
 
 // UPDATE ----------------------------------------------------------------------
@@ -155,16 +196,9 @@ type Msg {
   UserSelectedType(M)
   UserClickedReplay
   UserSwitchedCache
+  UserSwitchedDefaultspeed
+  UserSetSpeed(String)
 }
-
-// fn model_from_valid(wrapper: Model, actualstuff: ModelValid){
-//   Model(
-//     ..wrapper,
-//     out: Ok(
-//       actualstuff
-//     ),
-//   )
-// }
 
 fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
@@ -257,7 +291,6 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                     CostUnknown -> {
                       let #(updated_tree, new_cache) =
                         lt_one_step(combos, tree, cost_for_levels)
-                      //echo new_cache
                       let updated_line =
                         OneLineLevel(
                           combos:,
@@ -308,35 +341,31 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case newtype == maybevalid.onoff_or_level_input {
         True -> #(maybevalid, effect.none())
         False ->
-          next_model(
-            maybevalid.in,
-            maybevalid.on_index + 1,
-            newtype,
-            maybevalid.cache_enabled,
+          update_index_model_with_parsed_input(
+            Model(
+              ..maybevalid,
+              on_index: maybevalid.on_index + 1,
+              onoff_or_level_input: newtype,
+            ),
           )
       }
     }
     UserClickedReplay ->
-      next_model(
-        maybevalid.in,
-        maybevalid.on_index + 1,
-        maybevalid.onoff_or_level_input,
-        maybevalid.cache_enabled,
+      update_index_model_with_parsed_input(
+        Model(..maybevalid, on_index: maybevalid.on_index + 1),
       )
     UserSwitchedCache -> {
-      next_model(
-        maybevalid.in,
-        maybevalid.on_index + 1,
-        maybevalid.onoff_or_level_input,
-        !maybevalid.cache_enabled,
+      update_index_model_with_parsed_input(
+        Model(
+          ..maybevalid,
+          on_index: maybevalid.on_index + 1,
+          cache_enabled: !maybevalid.cache_enabled,
+        ),
       )
     }
     UserEnteredInput(input) ->
-      next_model(
-        input,
-        maybevalid.on_index + 1,
-        maybevalid.onoff_or_level_input,
-        maybevalid.cache_enabled,
+      update_index_model_with_parsed_input(
+        Model(..maybevalid, in: input, on_index: maybevalid.on_index + 1),
       )
     //after solving line wait a sec before going to next line to show solution
     UpdateSolvedLine(timer) ->
@@ -349,7 +378,8 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
           case m.problems {
             [next, ..rest] -> {
-              let tick_delay_for_next_line = ticks_for_currline(next)
+              let tick_delay_for_next_line =
+                ticks_for_currline(next, maybevalid.set_speed)
               #(
                 Model(
                   ..maybevalid,
@@ -369,6 +399,29 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           }
         }
       }
+    // note changing speed does not restart the run
+    // everything else does by calling update_index_model_with_parsed_input
+    UserSwitchedDefaultspeed -> #(
+      Model(..maybevalid, set_speed: case maybevalid.set_speed {
+        Some(_) -> None
+        None -> Some(0.0)
+      }),
+      effect.none(),
+    )
+    UserSetSpeed(spd) -> {
+      case spd |> parse_num_to_float {
+        Error(_) -> #(
+          Model(
+            ..maybevalid,
+            out: Error(
+              "strangely failed to parse step speed string from slider " <> spd,
+            ),
+          ),
+          effect.none(),
+        )
+        Ok(s) -> #(Model(..maybevalid, set_speed: Some(s)), effect.none())
+      }
+    }
   }
 }
 
@@ -406,11 +459,6 @@ fn check_cache(lt: LevelTree, optional_cache: Option(LevelsCostCache)) {
       case cache.level_costs |> dict.get(lt.levels) {
         Error(_) -> lt
         Ok(cached_cost) -> {
-          echo cache
-          echo "found one with levels in cache!!!"
-          echo lt.levels
-          echo "now set cost to"
-          echo cached_cost
           LevelTree(..lt, cost: cached_cost, was_pulled_from_cache: True)
         }
       }
@@ -576,46 +624,47 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
   Nil
 }
 
-fn next_model(input: String, index: Int, t: M, cache_enabled: Bool) {
-  let maybevalid = new_model(input, index, t, cache_enabled)
-  case maybevalid.out {
-    Error(_) -> todo
-    Ok(m) -> #(
-      maybevalid,
-      tick(TimerTick(ticks_for_currline(m.curr_problem), index)),
-    )
-  }
-}
-
-fn ticks_for_currline(l: OneLine) {
-  case l {
-    OneLineLevel(combos:, tree:, cost_for_levels:) -> {
-      let sum_cfp =
-        list.fold(
-          from: 0,
-          over: combos.cfp |> dict.values,
-          with: fn(acc, num_combos) { acc + dict.size(num_combos.combo) },
-        )
-      3_000_000 / { sum_cfp * sum_cfp }
-    }
-    OneLineOnOff(
-      btns:,
-      goal_bits_parity:,
-      num_bits:,
-      combos:,
-      check_combo:,
-      check_combo_parity:,
-    ) -> {
-      let len = list.length(num_bits)
-      case len < 8 {
-        True -> 3000 / { len |> pow_2 }
-        False -> 1
+fn ticks_for_currline(l: OneLine, set_speed: Option(Float)) {
+  case set_speed {
+    Some(spd) -> spd |> speed_float_to_step_millisec
+    None ->
+      case l {
+        OneLineLevel(combos:, tree:, cost_for_levels:) -> {
+          let sum_cfp =
+            list.fold(
+              from: 0,
+              over: combos.cfp |> dict.values,
+              with: fn(acc, num_combos) { acc + dict.size(num_combos.combo) },
+            )
+          int.min(1000, 300_000 / { sum_cfp * sum_cfp })
+        }
+        OneLineOnOff(
+          btns:,
+          goal_bits_parity:,
+          num_bits:,
+          combos:,
+          check_combo:,
+          check_combo_parity:,
+        ) -> {
+          let len = list.length(num_bits)
+          case len < 8 {
+            True -> 3000 / { len |> pow_2 }
+            False -> 1
+          }
+        }
       }
-    }
   }
 }
 
-fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
+/// parses model.in and tries to set actual problem
+/// also updates index, so new model's ticks will be received in update and old will be discarded
+fn update_index_model_with_parsed_input(from_model: Model) {
+  let input = from_model.in
+  let curr_index = from_model.on_index
+  let t = from_model.onoff_or_level_input
+  let cache_enabled = from_model.cache_enabled
+  let set_speed = from_model.set_speed
+
   let user_problems =
     input
     |> string.split("\n")
@@ -799,7 +848,7 @@ fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
         }
       }
     })
-  case user_problems {
+  let parsed_model = case user_problems {
     Error(_) -> todo
     Ok(problems) ->
       case problems {
@@ -809,6 +858,7 @@ fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
             on_index: curr_index,
             onoff_or_level_input: t,
             cache_enabled:,
+            set_speed:,
             out: Ok(ModelValid(
               problems: rest_problems,
               curr_problem: first_problem,
@@ -821,6 +871,7 @@ fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
             on_index: curr_index,
             onoff_or_level_input: t,
             cache_enabled: False,
+            set_speed:,
             out: Ok(ModelValid(
               problems: [],
               curr_problem: OneLineOnOff(
@@ -835,6 +886,16 @@ fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
             )),
           )
       }
+  }
+  case parsed_model.out {
+    Error(_) -> todo
+    Ok(m) -> #(
+      parsed_model,
+      tick(TimerTick(
+        ticks_for_currline(m.curr_problem, parsed_model.set_speed),
+        parsed_model.on_index,
+      )),
+    )
   }
 }
 
@@ -892,7 +953,7 @@ fn view(model: Model) -> Element(Msg) {
         ]
         OnOffM -> [
           h.text(
-            "Pressing a button twice negates itself and does nothing, so a minimal solution presses each button at most once.",
+            "Pressing a button twice negates itself, i.e. does nothing. So a minimal solution presses each button 0 or 1 times only.",
           ),
         ]
       }),
@@ -920,31 +981,34 @@ fn view(model: Model) -> Element(Msg) {
                   event.on_click(UserSelectedType(LevelM)),
                 ]),
                 h.label([a.for("levels")], [h.text("joltage levels")]),
-                h.input([
-                  a.title(
-                    "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
-                  ),
-                  a.type_("checkbox"),
-                  a.id("cache"),
-                  a.disabled(case model.onoff_or_level_input {
-                    LevelM -> False
-                    OnOffM -> True
-                  }),
-                  a.checked(model.cache_enabled),
-                  event.on_click(UserSwitchedCache),
-                ]),
-                h.label(
+                h.span(
                   [
                     a.title(
                       "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
                     ),
-                    a.for("cache"),
-                    a.style("opacity", case model.onoff_or_level_input {
-                      LevelM -> "1.0"
-                      OnOffM -> "0.3"
-                    }),
                   ],
-                  [h.text("cache levels")],
+                  [
+                    h.input([
+                      a.type_("checkbox"),
+                      a.id("cache"),
+                      a.disabled(case model.onoff_or_level_input {
+                        LevelM -> False
+                        OnOffM -> True
+                      }),
+                      a.checked(model.cache_enabled),
+                      event.on_click(UserSwitchedCache),
+                    ]),
+                    h.label(
+                      [
+                        a.for("cache"),
+                        a.style("opacity", case model.onoff_or_level_input {
+                          LevelM -> "1.0"
+                          OnOffM -> "0.3"
+                        }),
+                      ],
+                      [h.text("cache levels")],
+                    ),
+                  ],
                 ),
               ]),
               h.div([], [
@@ -961,6 +1025,72 @@ fn view(model: Model) -> Element(Msg) {
               ]),
             ],
           ),
+          h.div(
+            [
+              a.style("display", "flex"),
+              a.style("flex-direction", "column"),
+            ],
+            [
+              h.input([
+                a.type_("range"),
+                a.min("-3.001"),
+                a.max("3"),
+                a.step("0.001"),
+                a.disabled(case model.set_speed {
+                  Some(_) -> False
+                  None -> True
+                }),
+                a.value(case model.set_speed {
+                  Some(n) -> n |> float.to_string
+                  None -> "0"
+                }),
+                event.on_input(UserSetSpeed),
+              ]),
+              h.div([], [
+                h.span(
+                  [
+                    a.title(
+                      "The default step time is roughly based on input size for each line. However you can uncheck this to manually set speed with slider.",
+                    ),
+                  ],
+                  [
+                    h.input([
+                      a.type_("checkbox"),
+                      a.id("defaultspeed"),
+                      a.checked(case model.set_speed {
+                        Some(_) -> True
+                        None -> False
+                      }),
+                      event.on_click(UserSwitchedDefaultspeed),
+                    ]),
+                    h.label(
+                      [
+                        a.for("defaultspeed"),
+                      ],
+                      [h.text("manual speed ")],
+                    ),
+                    h.span(
+                      [
+                        a.style("width", "9ch"),
+                        a.style("display", "inline-block"),
+                      ],
+                      [
+                        h.text(case model.set_speed {
+                          None -> "(off)"
+                          Some(spd) ->
+                            spd
+                            |> speed_float_to_sec
+                            |> float.to_precision(3)
+                            |> float.to_string
+                            <> "s"
+                        }),
+                      ],
+                    ),
+                  ],
+                ),
+              ]),
+            ],
+          ),
           h.button(
             [
               event.on_click(UserClickedReplay),
@@ -968,7 +1098,7 @@ fn view(model: Model) -> Element(Msg) {
               a.style("padding", "3px"),
             ],
             [
-              h.text("Replay"),
+              h.text("replay"),
             ],
           ),
           case model.out {
@@ -976,13 +1106,15 @@ fn view(model: Model) -> Element(Msg) {
               h.text("")
             }
             Ok(m) -> {
-              h.text(
-                "min press sum: "
-                <> case m.count {
-                  Ok(n) -> n |> int.to_string
-                  Error(s) -> s
-                },
-              )
+              h.span([], [
+                h.text("min press sum: "),
+                h.span([a.style("font-size", "1.4em")], [
+                  h.text(case m.count {
+                    Ok(n) -> n |> int.to_string
+                    Error(s) -> s
+                  }),
+                ]),
+              ])
             }
           },
         ],
