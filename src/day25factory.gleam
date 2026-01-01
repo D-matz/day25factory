@@ -87,7 +87,16 @@ type LTCost {
 }
 
 type LevelTree {
-  LevelTree(levels: Levels, cost: LevelCost, children: List(LTCost))
+  LevelTree(
+    levels: Levels,
+    cost: LevelCost,
+    children: List(LTCost),
+    was_pulled_from_cache: Bool,
+  )
+}
+
+type LevelsCostCache {
+  LevelsCostCache(level_costs: Dict(Levels, LevelCost))
 }
 
 type OneLine {
@@ -99,21 +108,38 @@ type OneLine {
     check_combo: Set(Button),
     check_combo_parity: Int,
   )
-  OneLineLevel(combos: CombosForParity, tree: LevelTree)
+  OneLineLevel(
+    combos: CombosForParity,
+    tree: LevelTree,
+    cost_for_levels: Option(LevelsCostCache),
+  )
 }
 
-type Model {
-  Model(
-    in: String,
+type ModelValid {
+  ModelValid(
     curr_problem: OneLine,
     problems: List(OneLine),
-    on_index: Int,
     count: Result(Int, String),
   )
 }
 
+type M {
+  OnOffM
+  LevelM
+}
+
+type Model {
+  Model(
+    on_index: Int,
+    onoff_or_level_input: M,
+    cache_enabled: Bool,
+    in: String,
+    out: Result(ModelValid, String),
+  )
+}
+
 fn init(starting_example) -> #(Model, Effect(Msg)) {
-  next_model(starting_example, 0, OnOffM)
+  next_model(starting_example, 0, OnOffM, False)
 }
 
 // UPDATE ----------------------------------------------------------------------
@@ -128,89 +154,150 @@ type Msg {
   UserEnteredInput(String)
   UserSelectedType(M)
   UserClickedReplay
+  UserSwitchedCache
 }
 
-fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
+// fn model_from_valid(wrapper: Model, actualstuff: ModelValid){
+//   Model(
+//     ..wrapper,
+//     out: Ok(
+//       actualstuff
+//     ),
+//   )
+// }
+
+fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     ClockTickedForward(timer) -> {
-      case timer.index == m.on_index {
-        False -> #(m, effect.none())
-        True -> {
-          case m.curr_problem {
-            OneLineOnOff(
-              btns:,
-              goal_bits_parity:,
-              num_bits:,
-              combos:,
-              check_combo:,
-              check_combo_parity:,
-            ) -> {
-              case check_combo_parity == goal_bits_parity {
-                True -> {
-                  //this case to check if end sort of awkwardly both here +
-                  case m.problems {
-                    [] -> {
-                      #(
-                        Model(..m, count: case m.count {
-                          Error(_) -> m.count
-                          Ok(ct) -> Ok(ct + set.size(check_combo))
-                        }),
-                        effect.none(),
-                      )
+      case maybevalid.out {
+        Error(error_msg) -> {
+          todo
+        }
+        Ok(m) -> {
+          case timer.index == maybevalid.on_index {
+            False -> #(maybevalid, effect.none())
+            True -> {
+              case m.curr_problem {
+                OneLineOnOff(
+                  btns:,
+                  goal_bits_parity:,
+                  num_bits:,
+                  combos:,
+                  check_combo:,
+                  check_combo_parity:,
+                ) -> {
+                  case check_combo_parity == goal_bits_parity {
+                    True -> {
+                      //this case to check if end sort of awkwardly both here +
+                      case m.problems {
+                        [] -> {
+                          #(
+                            Model(
+                              ..maybevalid,
+                              out: Ok(
+                                ModelValid(..m, count: case m.count {
+                                  Error(_) -> m.count
+                                  Ok(ct) -> Ok(ct + set.size(check_combo))
+                                }),
+                              ),
+                            ),
+                            effect.none(),
+                          )
+                        }
+                        [_, ..] -> {
+                          #(
+                            Model(
+                              ..maybevalid,
+                              out: Ok(
+                                ModelValid(..m, count: case m.count {
+                                  Error(_) -> m.count
+                                  Ok(ct) -> Ok(ct + set.size(check_combo))
+                                }),
+                              ),
+                            ),
+                            tick_plus_delay(timer, 1000),
+                          )
+                        }
+                      }
                     }
-                    [_, ..] -> {
-                      #(
-                        Model(..m, count: case m.count {
-                          Error(_) -> m.count
-                          Ok(ct) -> Ok(ct + set.size(check_combo))
-                        }),
-                        tick_plus_delay(timer, 1000),
-                      )
+                    False -> {
+                      case combos {
+                        [fst_combo, ..rest_combos] -> {
+                          let curr_problem_next_combo =
+                            OneLineOnOff(
+                              check_combo: fst_combo,
+                              check_combo_parity: fst_combo |> parity,
+                              combos: rest_combos,
+                              btns:,
+                              goal_bits_parity:,
+                              num_bits:,
+                            )
+                          #(
+                            Model(
+                              ..maybevalid,
+                              out: Ok(
+                                ModelValid(
+                                  ..m,
+                                  curr_problem: curr_problem_next_combo,
+                                ),
+                              ),
+                            ),
+                            tick(timer),
+                          )
+                        }
+                        [] -> {
+                          panic as "no combos left should say count impossible"
+                        }
+                      }
                     }
                   }
                 }
-                False -> {
-                  case combos {
-                    [fst_combo, ..rest_combos] -> {
-                      let curr_problem_next_combo =
-                        OneLineOnOff(
-                          check_combo: fst_combo,
-                          check_combo_parity: fst_combo |> parity,
-                          combos: rest_combos,
-                          btns:,
-                          goal_bits_parity:,
-                          num_bits:,
+                OneLineLevel(combos:, tree:, cost_for_levels:) -> {
+                  case tree.cost {
+                    CostUnknown -> {
+                      let #(updated_tree, new_cache) =
+                        lt_one_step(combos, tree, cost_for_levels)
+                      //echo new_cache
+                      let updated_line =
+                        OneLineLevel(
+                          combos:,
+                          tree: updated_tree,
+                          cost_for_levels: new_cache,
                         )
                       #(
-                        Model(..m, curr_problem: curr_problem_next_combo),
+                        Model(
+                          ..maybevalid,
+                          out: Ok(ModelValid(..m, curr_problem: updated_line)),
+                        ),
                         tick(timer),
                       )
                     }
-                    [] -> {
-                      panic as "no combos left should say count impossible"
-                    }
+                    CostImpossible -> #(
+                      Model(
+                        ..maybevalid,
+                        out: Ok(
+                          ModelValid(
+                            ..m,
+                            count: Error("impossible input: " <> maybevalid.in),
+                          ),
+                        ),
+                      ),
+                      tick_plus_delay(timer, 1000),
+                    )
+                    CostVal(tree_min_ct) -> #(
+                      Model(
+                        ..maybevalid,
+                        out: Ok(
+                          ModelValid(..m, count: case m.count {
+                            Error(_) -> m.count
+                            Ok(ct) -> Ok(ct + tree_min_ct)
+                          }),
+                        ),
+                      ),
+                      tick_plus_delay(timer, 1000),
+                    )
                   }
                 }
-              }
-            }
-            OneLineLevel(combos:, tree:) -> {
-              case tree.cost {
-                CostUnknown -> {
-                  let updated_tree = lt_one_step(combos, tree)
-                  let updated_line = OneLineLevel(combos:, tree: updated_tree)
-                  #(Model(..m, curr_problem: updated_line), tick(timer))
-                }
-                CostImpossible -> #(
-                  Model(..m, count: Error("impossible input: " <> m.in)),
-                  tick_plus_delay(timer, 1000),
-                )
-                CostVal(tree_min_ct) -> #(
-                  Model(..m, count: case m.count {
-                    Error(_) -> m.count
-                    Ok(ct) -> Ok(ct + tree_min_ct)
-                  }),
-                  tick_plus_delay(timer, 1000),
-                )
               }
             }
           }
@@ -218,51 +305,76 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     }
     UserSelectedType(newtype) -> {
-      case newtype, m.curr_problem {
-        OnOffM, OneLineLevel(_, _) -> next_model(m.in, m.on_index + 1, OnOffM)
-        LevelM, OneLineOnOff(_, _, _, _, _, _) ->
-          next_model(m.in, m.on_index + 1, LevelM)
-        OnOffM, OneLineOnOff(_, _, _, _, _, _) -> #(m, effect.none())
-        LevelM, OneLineLevel(_, _) -> #(m, effect.none())
+      case newtype == maybevalid.onoff_or_level_input {
+        True -> #(maybevalid, effect.none())
+        False ->
+          next_model(
+            maybevalid.in,
+            maybevalid.on_index + 1,
+            newtype,
+            maybevalid.cache_enabled,
+          )
       }
-      next_model(m.in, m.on_index + 1, case m.curr_problem {
-        OneLineLevel(_, _) -> OnOffM
-        OneLineOnOff(_, _, _, _, _, _) -> LevelM
-      })
     }
-    UserClickedReplay -> {
-      next_model(m.in, m.on_index + 1, case m.curr_problem {
-        OneLineOnOff(_, _, _, _, _, _) -> OnOffM
-        OneLineLevel(_, _) -> LevelM
-      })
-    }
-    UserEnteredInput(input) -> {
-      next_model(input, m.on_index + 1, case m.curr_problem {
-        OneLineOnOff(_, _, _, _, _, _) -> OnOffM
-        OneLineLevel(_, _) -> LevelM
-      })
-    }
-    //after solving line wait a sec before going to next line to show solution
-    UpdateSolvedLine(timer) -> {
-      // should only go to UpdateSolvedLine if there are more lines left in problems
-      // awkward split of this + case where tick_plus_delay is called
-      // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
-      let assert [next, ..rest] = m.problems
-      let tick_delay_for_next_line = ticks_for_currline(next)
-      #(
-        Model(
-          in: m.in,
-          curr_problem: next,
-          problems: rest,
-          on_index: m.on_index,
-          count: m.count,
-        ),
-        tick(TimerTick(index: timer.index, millisec: tick_delay_for_next_line)),
+    UserClickedReplay ->
+      next_model(
+        maybevalid.in,
+        maybevalid.on_index + 1,
+        maybevalid.onoff_or_level_input,
+        maybevalid.cache_enabled,
+      )
+    UserSwitchedCache -> {
+      next_model(
+        maybevalid.in,
+        maybevalid.on_index + 1,
+        maybevalid.onoff_or_level_input,
+        !maybevalid.cache_enabled,
       )
     }
+    UserEnteredInput(input) ->
+      next_model(
+        input,
+        maybevalid.on_index + 1,
+        maybevalid.onoff_or_level_input,
+        maybevalid.cache_enabled,
+      )
+    //after solving line wait a sec before going to next line to show solution
+    UpdateSolvedLine(timer) ->
+      case maybevalid.out {
+        Error(_) -> #(maybevalid, effect.none())
+        //error case could be panic and would be fine? if no problem will never solve problem
+        Ok(m) -> {
+          // should only go to UpdateSolvedLine if there are more lines left in problems
+          // awkward split of this + case where tick_plus_delay is called
+          // because on finishing problem we want to update counter only, then pause 1s, then update to next problem
+          case m.problems {
+            [next, ..rest] -> {
+              let tick_delay_for_next_line = ticks_for_currline(next)
+              #(
+                Model(
+                  ..maybevalid,
+                  out: Ok(ModelValid(
+                    curr_problem: next,
+                    problems: rest,
+                    count: m.count,
+                  )),
+                ),
+                tick(TimerTick(
+                  index: timer.index,
+                  millisec: tick_delay_for_next_line,
+                )),
+              )
+            }
+            [] -> #(maybevalid, effect.none())
+          }
+        }
+      }
   }
 }
 
+// if making new child of zeros or less than zero
+// set cost to 0 or impossible immediately
+// we won't need to recurse later as it's not unknown
 fn check_zeros_or_ltzero(lt: LevelTree) {
   let level_values =
     lt.levels.num_ctrs
@@ -285,6 +397,26 @@ fn check_zeros_or_ltzero(lt: LevelTree) {
   }
 }
 
+// if making new child with levels in cache
+// set cost to cache level, which should be a value or impossible
+fn check_cache(lt: LevelTree, optional_cache: Option(LevelsCostCache)) {
+  case optional_cache {
+    None -> lt
+    Some(cache) ->
+      case cache.level_costs |> dict.get(lt.levels) {
+        Error(_) -> lt
+        Ok(cached_cost) -> {
+          echo cache
+          echo "found one with levels in cache!!!"
+          echo lt.levels
+          echo "now set cost to"
+          echo cached_cost
+          LevelTree(..lt, cost: cached_cost, was_pulled_from_cache: True)
+        }
+      }
+  }
+}
+
 fn levels_minus_combo_amt_then_halved(
   old_levels: Levels,
   check_btn_combo_child: NumAmts,
@@ -303,12 +435,16 @@ fn levels_minus_combo_amt_then_halved(
   )
 }
 
-fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
+fn lt_one_step(
+  precomputed_parity_combos: CombosForParity,
+  lt: LevelTree,
+  cache: Option(LevelsCostCache),
+) -> #(LevelTree, Option(LevelsCostCache)) {
   case
     precomputed_parity_combos.cfp
     |> dict.get(lt.levels |> levels_parity)
   {
-    Error(_) -> LevelTree(..lt, cost: CostImpossible)
+    Error(_) -> #(LevelTree(..lt, cost: CostImpossible), cache)
     Ok(pcs) -> {
       // child_not_solved might not be found
       // - in that case, we have all children and the cost val or impossible for each, so calc min for this one (1 step)
@@ -358,7 +494,14 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
                 }
               },
             )
-          LevelTree(..lt, cost: min_cost)
+          let new_cache = case cache {
+            None -> None
+            Some(c) ->
+              Some(LevelsCostCache(
+                c.level_costs |> dict.insert(lt.levels, min_cost),
+              ))
+          }
+          #(LevelTree(..lt, cost: min_cost), new_cache)
         }
         Ok(missing_lbc) -> {
           let look_for_levels =
@@ -368,39 +511,46 @@ fn lt_one_step(precomputed_parity_combos: CombosForParity, lt: LevelTree) {
             |> list.find(fn(lt_child) {
               lt_child.child_tree.levels == look_for_levels
             })
-          let new_children = case missing_or_costunknown {
+          let #(new_children, new_cache) = case missing_or_costunknown {
             Error(_) -> {
+              // found a button combo that has correct parity but no child for the new level after subtracting those buttons
+              // so create missing child with cost unknown
               let new_leveltree =
                 LevelTree(
                   children: [],
                   cost: CostUnknown,
                   levels: look_for_levels,
+                  was_pulled_from_cache: False,
                 )
-              let new_leveltree = check_zeros_or_ltzero(new_leveltree)
-              [
+                |> check_zeros_or_ltzero
+                //might set cost to 0 or impossible
+                |> check_cache(cache)
+              //if using cache, might set cost to some val
+              let new_children = [
                 LTCost(to_child: missing_lbc.1, child_tree: new_leveltree),
                 ..lt.children
               ]
+              #(new_children, cache)
             }
             Ok(ch) -> {
+              // found a button combo for parity that does have a child with new levels, but cost unknown
+              // recurse to add child
+              let #(child_tree, new_cache) =
+                lt_one_step(precomputed_parity_combos, ch.child_tree, cache)
               let existing_child_updated_cost =
-                LTCost(
-                  to_child: ch.to_child,
-                  child_tree: lt_one_step(
-                    precomputed_parity_combos,
-                    ch.child_tree,
-                  ),
-                )
-              lt.children
-              |> list.map(fn(old_child) {
-                case old_child.child_tree.levels == look_for_levels {
-                  True -> existing_child_updated_cost
-                  False -> old_child
-                }
-              })
+                LTCost(to_child: ch.to_child, child_tree:)
+              let new_children =
+                lt.children
+                |> list.map(fn(old_child) {
+                  case old_child.child_tree.levels == look_for_levels {
+                    True -> existing_child_updated_cost
+                    False -> old_child
+                  }
+                })
+              #(new_children, new_cache)
             }
           }
-          LevelTree(..lt, children: new_children)
+          #(LevelTree(..lt, children: new_children), new_cache)
         }
       }
     }
@@ -426,21 +576,27 @@ fn set_timeout(_delay: Int, _cb: fn() -> a) -> Nil {
   Nil
 }
 
-fn next_model(input: String, index: Int, t: M) {
-  let m = new_model(input, index, t)
-  #(m, tick(TimerTick(ticks_for_currline(m.curr_problem), index)))
+fn next_model(input: String, index: Int, t: M, cache_enabled: Bool) {
+  let maybevalid = new_model(input, index, t, cache_enabled)
+  case maybevalid.out {
+    Error(_) -> todo
+    Ok(m) -> #(
+      maybevalid,
+      tick(TimerTick(ticks_for_currline(m.curr_problem), index)),
+    )
+  }
 }
 
 fn ticks_for_currline(l: OneLine) {
   case l {
-    OneLineLevel(combos:, tree:) -> {
-      let sum_levels =
+    OneLineLevel(combos:, tree:, cost_for_levels:) -> {
+      let sum_cfp =
         list.fold(
           from: 0,
-          over: tree.levels.num_ctrs |> dict.to_list,
-          with: fn(acc, n) { acc + n.1 },
+          over: combos.cfp |> dict.values,
+          with: fn(acc, num_combos) { acc + dict.size(num_combos.combo) },
         )
-      3000 / sum_levels
+      3_000_000 / { sum_cfp * sum_cfp }
     }
     OneLineOnOff(
       btns:,
@@ -459,181 +615,226 @@ fn ticks_for_currline(l: OneLine) {
   }
 }
 
-type M {
-  OnOffM
-  LevelM
-}
-
-fn new_model(input: String, curr_index: Int, t: M) {
-  let problems =
+fn new_model(input: String, curr_index: Int, t: M, cache_enabled: Bool) {
+  let user_problems =
     input
     |> string.split("\n")
-    |> list.map(fn(line) {
-      let assert [goal, ..rest] = line |> string.split("]")
-      let assert [buttons, ..goal_levels] =
-        rest |> string.concat |> string.split("{")
-      let btn_numlists =
-        buttons
-        |> string.replace("(", "")
-        |> string.replace(")", "")
-        |> string.trim()
-        |> string.split(" ")
-        |> list.map(fn(nums) {
-          nums
-          |> string.split(",")
-          |> list.map(fn(num) {
-            let assert Ok(n) = int.parse(num)
-            n
-          })
-        })
-      case t {
-        OnOffM -> {
-          let btns =
-            btn_numlists
-            |> list.map(fn(btn) {
-              list.fold(
-                from: Button(bits: 0),
-                over: btn,
-                with: fn(btn_acc, num) {
-                  Button(btn_acc.bits |> int.bitwise_or(pow_2(num)))
-                },
-              )
-            })
-          let combos = all_combinations(btns) |> list.map(set.from_list)
-          let assert Ok(first_combo) = combos |> list.first()
-          let goal =
-            goal
-            |> string.to_graphemes
-            |> list.drop(1)
-            |> list.map(fn(c) {
-              case c {
-                "#" -> True
-                "." -> False
-                _ -> panic
-              }
-            })
-          let gb =
-            list.fold(from: #(0, 1), over: goal, with: fn(acc, b) {
-              let acc_now = case b {
-                True -> acc.0 |> int.bitwise_or(acc.1)
-                False -> acc.0
-              }
-              #(acc_now, acc.1 * 2)
-            })
-          let goal_bits_parity = gb.0
-          let num_bits = list.range(0, list.length(goal) - 1)
-          OneLineOnOff(
-            goal_bits_parity:,
-            btns:,
-            num_bits:,
-            combos:,
-            check_combo: first_combo,
-            check_combo_parity: first_combo |> parity,
-          )
-        }
-        LevelM -> {
-          let btn_parity_combos: CombosForParity =
-            list.fold(
-              from: CombosForParity(cfp: dict.new()),
-              over: all_combinations(btn_numlists),
-              with: fn(acc, combination) {
-                let num_amts =
-                  list.fold(
-                    from: dict.new(),
-                    over: combination,
-                    with: fn(outer_acc, btn) {
-                      list.fold(
-                        from: outer_acc,
-                        over: btn,
-                        with: fn(inner_acc, num) {
-                          let curr_val = inner_acc |> dict.get(num)
-                          case curr_val {
-                            Error(_) -> inner_acc |> dict.insert(num, 1)
-                            Ok(v) -> inner_acc |> dict.insert(num, v + 1)
-                          }
-                        },
-                      )
-                    },
-                  )
-                let new_cost =
-                  HowManyButtonsInCombo(
-                    buttons_used: combination |> list.length,
-                  )
-                let new_amt = NumAmts(num_amts:)
-                let parity = Levels(num_amts) |> levels_parity
-                let existing = acc.cfp |> dict.get(parity)
-                let with_new_cfp = case existing {
-                  Error(_) -> dict.new() |> dict.insert(new_amt, new_cost)
-                  Ok(others) -> {
-                    case others.combo |> dict.get(new_amt) {
-                      Error(_) -> others.combo |> dict.insert(new_amt, new_cost)
-                      Ok(combo_same_total) ->
-                        others.combo
-                        |> dict.insert(
-                          new_amt,
-                          HowManyButtonsInCombo(int.min(
-                            combo_same_total.buttons_used,
-                            new_cost.buttons_used,
-                          )),
+    |> list.try_map(fn(line) {
+      case line |> string.split("]") {
+        [] -> Error("err 1")
+        [goal, ..rest] -> {
+          case rest |> string.concat |> string.split("{") {
+            [] -> Error("err 2")
+            [buttons, ..goal_levels] ->
+              Ok({
+                let user_btn_numlists =
+                  buttons
+                  |> string.replace("(", "")
+                  |> string.replace(")", "")
+                  |> string.trim()
+                  |> string.split(" ")
+                  |> list.try_map(fn(nums) {
+                    nums
+                    |> string.split(",")
+                    |> list.try_map(fn(num) {
+                      case int.parse(num) {
+                        Error(_) -> Error("err 3")
+                        Ok(n) -> Ok(n)
+                      }
+                    })
+                  })
+                case user_btn_numlists {
+                  Error(_) -> todo
+                  Ok(btn_numlists) ->
+                    case t {
+                      OnOffM -> {
+                        let btns =
+                          btn_numlists
+                          |> list.map(fn(btn) {
+                            list.fold(
+                              from: Button(bits: 0),
+                              over: btn,
+                              with: fn(btn_acc, num) {
+                                Button(
+                                  btn_acc.bits |> int.bitwise_or(pow_2(num)),
+                                )
+                              },
+                            )
+                          })
+                        let combos =
+                          all_combinations(btns) |> list.map(set.from_list)
+                        let assert Ok(first_combo) = combos |> list.first()
+                          as "ass4"
+                        let goal =
+                          goal
+                          |> string.to_graphemes
+                          |> list.drop(1)
+                          |> list.map(fn(c) {
+                            case c {
+                              "#" -> True
+                              "." -> False
+                              _ -> panic
+                            }
+                          })
+                        let gb =
+                          list.fold(from: #(0, 1), over: goal, with: fn(acc, b) {
+                            let acc_now = case b {
+                              True -> acc.0 |> int.bitwise_or(acc.1)
+                              False -> acc.0
+                            }
+                            #(acc_now, acc.1 * 2)
+                          })
+                        let goal_bits_parity = gb.0
+                        let num_bits = list.range(0, list.length(goal) - 1)
+                        OneLineOnOff(
+                          goal_bits_parity:,
+                          btns:,
+                          num_bits:,
+                          combos:,
+                          check_combo: first_combo,
+                          check_combo_parity: first_combo |> parity,
                         )
+                      }
+                      LevelM -> {
+                        let btn_parity_combos: CombosForParity =
+                          list.fold(
+                            from: CombosForParity(cfp: dict.new()),
+                            over: all_combinations(btn_numlists),
+                            with: fn(acc, combination) {
+                              let num_amts =
+                                list.fold(
+                                  from: dict.new(),
+                                  over: combination,
+                                  with: fn(outer_acc, btn) {
+                                    list.fold(
+                                      from: outer_acc,
+                                      over: btn,
+                                      with: fn(inner_acc, num) {
+                                        let curr_val =
+                                          inner_acc |> dict.get(num)
+                                        case curr_val {
+                                          Error(_) ->
+                                            inner_acc |> dict.insert(num, 1)
+                                          Ok(v) ->
+                                            inner_acc |> dict.insert(num, v + 1)
+                                        }
+                                      },
+                                    )
+                                  },
+                                )
+                              let new_cost =
+                                HowManyButtonsInCombo(
+                                  buttons_used: combination |> list.length,
+                                )
+                              let new_amt = NumAmts(num_amts:)
+                              let parity = Levels(num_amts) |> levels_parity
+                              let existing = acc.cfp |> dict.get(parity)
+                              let with_new_cfp = case existing {
+                                Error(_) ->
+                                  dict.new() |> dict.insert(new_amt, new_cost)
+                                Ok(others) -> {
+                                  case others.combo |> dict.get(new_amt) {
+                                    Error(_) ->
+                                      others.combo
+                                      |> dict.insert(new_amt, new_cost)
+                                    Ok(combo_same_total) ->
+                                      others.combo
+                                      |> dict.insert(
+                                        new_amt,
+                                        HowManyButtonsInCombo(int.min(
+                                          combo_same_total.buttons_used,
+                                          new_cost.buttons_used,
+                                        )),
+                                      )
+                                  }
+                                }
+                              }
+                              CombosForParity(
+                                cfp: acc.cfp
+                                |> dict.insert(
+                                  parity,
+                                  LevelButtonCombo(with_new_cfp),
+                                ),
+                              )
+                            },
+                          )
+                        let goal_ints =
+                          goal_levels
+                          |> string.concat
+                          |> string.drop_end(1)
+                          |> string.split(",")
+                          |> list.map(fn(x) {
+                            let assert Ok(n) = int.parse(x) as "ass5"
+                            n
+                          })
+                        let starting_levels =
+                          list.index_fold(
+                            from: dict.new(),
+                            over: goal_ints,
+                            with: fn(acc, amt, idx) {
+                              acc |> dict.insert(idx, amt)
+                            },
+                          )
+                        let starting_tree =
+                          LevelTree(
+                            levels: Levels(starting_levels),
+                            cost: CostUnknown,
+                            children: [],
+                            was_pulled_from_cache: False,
+                          )
+                        let starting_cache = case cache_enabled {
+                          True -> Some(LevelsCostCache(level_costs: dict.new()))
+                          False -> None
+                        }
+                        OneLineLevel(
+                          combos: btn_parity_combos,
+                          tree: starting_tree,
+                          cost_for_levels: starting_cache,
+                        )
+                      }
                     }
-                  }
                 }
-                CombosForParity(
-                  cfp: acc.cfp
-                  |> dict.insert(parity, LevelButtonCombo(with_new_cfp)),
-                )
-              },
-            )
-          let goal_ints =
-            goal_levels
-            |> string.concat
-            |> string.drop_end(1)
-            |> string.split(",")
-            |> list.map(fn(x) {
-              let assert Ok(n) = int.parse(x)
-              n
-            })
-          let starting_levels =
-            list.index_fold(
-              from: dict.new(),
-              over: goal_ints,
-              with: fn(acc, amt, idx) { acc |> dict.insert(idx, amt) },
-            )
-          let starting_tree =
-            LevelTree(
-              levels: Levels(starting_levels),
-              cost: CostUnknown,
-              children: [],
-            )
-          OneLineLevel(combos: btn_parity_combos, tree: starting_tree)
+              })
+          }
         }
       }
     })
-  case problems {
-    [first_problem, ..rest_problems] ->
-      Model(
-        in: input,
-        problems: rest_problems,
-        curr_problem: first_problem,
-        on_index: curr_index,
-        count: Ok(0),
-      )
-    [] ->
-      Model(
-        in: input,
-        problems: [],
-        curr_problem: OneLineOnOff(
-          btns: [],
-          goal_bits_parity: 0,
-          num_bits: [],
-          combos: [],
-          check_combo: set.new(),
-          check_combo_parity: 0,
-        ),
-        on_index: curr_index,
-        count: Error("empty input (need at least 1 line)"),
-      )
+  case user_problems {
+    Error(_) -> todo
+    Ok(problems) ->
+      case problems {
+        [first_problem, ..rest_problems] ->
+          Model(
+            in: input,
+            on_index: curr_index,
+            onoff_or_level_input: t,
+            cache_enabled:,
+            out: Ok(ModelValid(
+              problems: rest_problems,
+              curr_problem: first_problem,
+              count: Ok(0),
+            )),
+          )
+        [] ->
+          Model(
+            in: input,
+            on_index: curr_index,
+            onoff_or_level_input: t,
+            cache_enabled: False,
+            out: Ok(ModelValid(
+              problems: [],
+              curr_problem: OneLineOnOff(
+                btns: [],
+                goal_bits_parity: 0,
+                num_bits: [],
+                combos: [],
+                check_combo: set.new(),
+                check_combo_parity: 0,
+              ),
+              count: Error("empty input (need at least 1 line)"),
+            )),
+          )
+      }
   }
 }
 
@@ -647,10 +848,6 @@ fn all_combinations(l) {
 // VIEW ------------------------------------------------------------------------
 
 fn view(model: Model) -> Element(Msg) {
-  let on_levels = case model.curr_problem {
-    OneLineLevel(_, _) -> True
-    OneLineOnOff(_, _, _, _, _, _) -> False
-  }
   h.article(
     [
       a.style("background", "#292d3e"),
@@ -668,7 +865,7 @@ fn view(model: Model) -> Element(Msg) {
         h.a([a.href("https://adventofcode.com/2025/day/10")], [
           h.text("Advent of Code day 10"),
         ]),
-        h.text(" visualization: joltage indicator and level "),
+        h.text(" visualization: joltage indicators and levels "),
         h.a(
           [
             a.href(
@@ -678,8 +875,8 @@ fn view(model: Model) -> Element(Msg) {
           [h.text("(source)")],
         ),
       ]),
-      h.p([], case model.curr_problem {
-        OneLineLevel(_, _) -> [
+      h.p([], case model.onoff_or_level_input {
+        LevelM -> [
           h.text("From "),
           h.a(
             [
@@ -693,7 +890,7 @@ fn view(model: Model) -> Element(Msg) {
             ": for all combos of 0 or 1 of each button making all counters even, divide by 2 and recurse.",
           ),
         ]
-        OneLineOnOff(_, _, _, _, _, _) -> [
+        OnOffM -> [
           h.text(
             "Pressing a button twice negates itself and does nothing, so a minimal solution presses each button at most once.",
           ),
@@ -715,20 +912,52 @@ fn view(model: Model) -> Element(Msg) {
               h.div([], [
                 h.input([
                   a.type_("radio"),
-                  a.id("lights"),
-                  a.checked(!on_levels),
-                  event.on_click(UserSelectedType(OnOffM)),
+                  a.id("levels"),
+                  a.checked(case model.onoff_or_level_input {
+                    LevelM -> True
+                    OnOffM -> False
+                  }),
+                  event.on_click(UserSelectedType(LevelM)),
                 ]),
-                h.label([a.for("lights")], [h.text("indicator lights")]),
+                h.label([a.for("levels")], [h.text("joltage levels")]),
+                h.input([
+                  a.title(
+                    "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
+                  ),
+                  a.type_("checkbox"),
+                  a.id("cache"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  a.checked(model.cache_enabled),
+                  event.on_click(UserSwitchedCache),
+                ]),
+                h.label(
+                  [
+                    a.title(
+                      "The first time we get minimum press count for some set of joltage levels, save that and use it next time we get to the same levels, instead of recursing.",
+                    ),
+                    a.for("cache"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("cache levels")],
+                ),
               ]),
               h.div([], [
                 h.input([
                   a.type_("radio"),
-                  a.id("levels"),
-                  a.checked(on_levels),
-                  event.on_click(UserSelectedType(LevelM)),
+                  a.id("lights"),
+                  a.checked(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  event.on_click(UserSelectedType(OnOffM)),
                 ]),
-                h.label([a.for("levels")], [h.text("joltage levels")]),
+                h.label([a.for("lights")], [h.text("indicator lights")]),
               ]),
             ],
           ),
@@ -742,17 +971,20 @@ fn view(model: Model) -> Element(Msg) {
               h.text("Replay"),
             ],
           ),
-          h.text(
-            // case model.curr_b {
-            //   Normal(_) -> "split count: "
-            //   Quantum(_) -> "timeline count: "
-            // }
-            "min press sum: "
-            <> case model.count {
-              Ok(n) -> n |> int.to_string
-              Error(s) -> s
-            },
-          ),
+          case model.out {
+            Error(_) -> {
+              h.text("")
+            }
+            Ok(m) -> {
+              h.text(
+                "min press sum: "
+                <> case m.count {
+                  Ok(n) -> n |> int.to_string
+                  Error(s) -> s
+                },
+              )
+            }
+          },
         ],
       ),
       h.textarea(
@@ -764,117 +996,126 @@ fn view(model: Model) -> Element(Msg) {
         ],
         model.in,
       ),
-      case model.curr_problem {
-        OneLineOnOff(
-          btns:,
-          goal_bits_parity:,
-          num_bits:,
-          combos:,
-          check_combo:,
-          check_combo_parity:,
-        ) -> {
-          h.pre(
-            [a.style("font-size", "3em")],
-            list.reverse(
-              list.fold(from: [], over: num_bits, with: fn(light_acc, bit) {
-                let light_on =
-                  check_combo_parity
-                  |> int.bitwise_and(pow_2(bit))
-                case light_on {
-                  0 -> [
-                    h.span(
-                      [
-                        a.style("width", "3ch"),
-                        a.style("display", "inline-block"),
-                        a.style("text-align", "center"),
-                        a.style("opacity", "0.35"),
-                      ],
-                      [
-                        h.text("💡"),
-                      ],
-                    ),
-                    ..light_acc
-                  ]
-                  _ -> [
-                    h.span(
-                      [
-                        a.style("width", "3ch"),
-                        a.style("display", "inline-block"),
-                        a.style("text-align", "center"),
-                        a.style("filter", "drop-shadow(0 0 25px yellow)"),
-                      ],
-                      [
-                        h.text("💡"),
-                      ],
-                    ),
-                    ..light_acc
-                  ]
-                }
-              }),
-            )
-              |> list.append(
-                list.reverse([
-                  h.text(
-                    num_bits
-                    |> list.map(fn(n) {
-                      case n < 10 {
-                        True -> " " <> int.to_string(n) <> " "
-                        False ->
-                          case n < 100 {
-                            True -> int.to_string(n) <> " "
-                            False ->
-                              case n < 1000 {
-                                True -> int.to_string(n)
-                                False -> int.to_string(n % 1000)
-                              }
-                          }
-                      }
-                    })
-                    |> string.concat,
-                  ),
-                  h.text("\n"),
-                  ..list.fold(from: [], over: btns, with: fn(outer_acc, btn) {
-                    let btn_on = check_combo |> set.contains(btn)
-                    [
+      case model.out {
+        Error(input_invalid) -> h.text(input_invalid)
+        Ok(m) ->
+          case m.curr_problem {
+            OneLineOnOff(
+              btns:,
+              goal_bits_parity:,
+              num_bits:,
+              combos:,
+              check_combo:,
+              check_combo_parity:,
+            ) -> {
+              h.pre(
+                [a.style("font-size", "3em"), a.style("overflow", "visible")],
+                list.reverse(
+                  list.fold(from: [], over: num_bits, with: fn(light_acc, bit) {
+                    let light_on =
+                      check_combo_parity
+                      |> int.bitwise_and(pow_2(bit))
+                    case light_on {
+                      0 -> [
+                        h.span(
+                          [
+                            a.style("width", "3ch"),
+                            a.style("display", "inline-block"),
+                            a.style("text-align", "center"),
+                            a.style("opacity", "0.35"),
+                          ],
+                          [
+                            h.text("💡"),
+                          ],
+                        ),
+                        ..light_acc
+                      ]
+                      _ -> [
+                        h.span(
+                          [
+                            a.style("width", "3ch"),
+                            a.style("display", "inline-block"),
+                            a.style("text-align", "center"),
+                            a.style("filter", "drop-shadow(0 0 25px yellow)"),
+                          ],
+                          [
+                            h.text("💡"),
+                          ],
+                        ),
+                        ..light_acc
+                      ]
+                    }
+                  }),
+                )
+                  |> list.append(
+                    list.reverse([
                       h.text(
-                        string.concat([
-                          "(",
-                          num_bits
-                            |> list.filter(fn(n) {
-                              case pow_2(n) |> int.bitwise_and(btn.bits) {
-                                0 -> False
-                                _ -> True
-                              }
-                            })
-                            |> list.map(int.to_string)
-                            |> string.join(","),
-                          ")",
-                        ]),
-                      ),
-                      ..list.fold(
-                        from: [h.text("\n"), ..outer_acc],
-                        over: num_bits,
-                        with: fn(inner_acc, bit) {
-                          let new_elt = case
-                            btn.bits |> int.bitwise_and(pow_2(bit))
-                          {
-                            0 -> h.text("   ")
-                            _ ->
-                              case btn_on {
-                                True -> h.text("[x]")
-                                False -> h.text("[ ]")
+                        num_bits
+                        |> list.map(fn(n) {
+                          case n < 10 {
+                            True -> " " <> int.to_string(n) <> " "
+                            False ->
+                              case n < 100 {
+                                True -> int.to_string(n) <> " "
+                                False ->
+                                  case n < 1000 {
+                                    True -> int.to_string(n)
+                                    False -> int.to_string(n % 1000)
+                                  }
                               }
                           }
-                          [new_elt, ..inner_acc]
+                        })
+                        |> string.concat,
+                      ),
+                      h.text("\n"),
+                      ..list.fold(
+                        from: [],
+                        over: btns,
+                        with: fn(outer_acc, btn) {
+                          let btn_on = check_combo |> set.contains(btn)
+                          [
+                            h.text(
+                              string.concat([
+                                "(",
+                                num_bits
+                                  |> list.filter(fn(n) {
+                                    case pow_2(n) |> int.bitwise_and(btn.bits) {
+                                      0 -> False
+                                      _ -> True
+                                    }
+                                  })
+                                  |> list.map(int.to_string)
+                                  |> string.join(","),
+                                ")",
+                              ]),
+                            ),
+                            ..list.fold(
+                              from: [h.text("\n"), ..outer_acc],
+                              over: num_bits,
+                              with: fn(inner_acc, bit) {
+                                let new_elt = case
+                                  btn.bits |> int.bitwise_and(pow_2(bit))
+                                {
+                                  0 -> h.text("   ")
+                                  _ ->
+                                    case btn_on {
+                                      True -> h.text("[x]")
+                                      False -> h.text("[ ]")
+                                    }
+                                }
+                                [new_elt, ..inner_acc]
+                              },
+                            )
+                          ]
                         },
                       )
-                    ]
-                  })
-                ]),
-              ),
-          )
-        }
-        OneLineLevel(_, tree:) -> h.pre([], Root(tree) |> view_tree_lines(0))
+                    ]),
+                  ),
+              )
+            }
+            OneLineLevel(_, tree, _) ->
+              h.pre([], Root(tree) |> view_tree_lines(0))
+          }
       },
     ],
   )
@@ -894,7 +1135,7 @@ fn view_tree_lines(node: TreeOrCost, indent: Int) -> List(Element(Msg)) {
     Root(lt) -> #(lt, "")
   }
   let level_nums_string_before =
-    h.text(string.concat([string.repeat("      ", indent), combo_cost]))
+    h.text(string.concat([string.repeat("           ", indent), combo_cost]))
   let level_nums_string_color =
     h.span(
       [
@@ -927,13 +1168,21 @@ fn view_tree_lines(node: TreeOrCost, indent: Int) -> List(Element(Msg)) {
   let level_nums_string_after =
     h.text(
       string.concat([
-        case lt.cost {
-          CostUnknown -> " = min of"
-          CostImpossible -> ""
-          CostVal(v) ->
-            case v {
-              0 -> ""
-              _ -> " = min of"
+        case lt.was_pulled_from_cache {
+          True ->
+            case lt.cost {
+              CostUnknown -> " = min of"
+              _ -> " (cached)"
+            }
+          False ->
+            case lt.cost {
+              CostUnknown -> " = min of"
+              CostImpossible -> ""
+              CostVal(v) ->
+                case v {
+                  0 -> ""
+                  _ -> " = min of"
+                }
             }
         },
         "\n",
