@@ -228,8 +228,8 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     ClockTickedForward(timer) -> {
       case maybevalid.out {
-        Error(error_msg) -> {
-          todo as "idk 3"
+        Error(_) -> {
+          #(maybevalid, effect.none())
         }
         Ok(m) -> {
           case timer.index == maybevalid.on_index {
@@ -273,7 +273,39 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                           )
                         }
                         [] -> {
-                          panic as "no combos left should say count impossible"
+                          #(
+                            Model(
+                              ..maybevalid,
+                              count: Error(
+                                "no button combinations work for indicator lights goal "
+                                <> "["
+                                <> {
+                                  goal_bits_parity
+                                  |> int.to_base2
+                                  |> string.to_graphemes()
+                                  |> list.map(fn(bit) {
+                                    case bit {
+                                      "1" -> "#"
+                                      "0" -> "."
+                                      _ -> panic as "not zero??"
+                                    }
+                                  })
+                                  |> string.concat
+                                  |> fn(s) {
+                                    case
+                                      string.length(s) != list.length(num_bits)
+                                    {
+                                      True -> "." <> s
+                                      False -> s
+                                    }
+                                  }
+                                  |> string.reverse
+                                }
+                                <> "]",
+                              ),
+                            ),
+                            effect.none(),
+                          )
                         }
                       }
                     }
@@ -682,7 +714,10 @@ fn add_count_go_next_line(maybevalid: Model, timer_index: Int, add_count) {
             ),
           )
         }
-        Error(e) -> todo as "invalid line"
+        Error(_) -> #(
+          Model(..maybevalid, all_done: True, out: next, count: Error("")),
+          effect.none(),
+        )
       }
     }
   }
@@ -695,6 +730,7 @@ fn update_index_model_with_parsed_input(from_model: Model) {
   let problems =
     input
     |> string.split("\n")
+    |> list.filter(fn(maybe_emptyline) { maybe_emptyline != "" })
   let from_model = Model(..from_model, problems:, all_done: False)
   add_count_go_next_line(from_model, from_model.on_index, Ok(0))
 }
@@ -704,180 +740,224 @@ fn parse_line(
   cache_enabled: Bool,
   t: M,
 ) -> Result(OneLine, String) {
-  let ret = case line |> string.split("] ") {
-    [] -> Error("err 1")
+  let ret = case line |> string.split("]") {
+    [] -> Error("error parsing " <> line <> " could not find \"]\"")
     [goal, ..rest] -> {
-      case rest |> string.concat |> string.split(" {") {
-        [] -> Error("err 2")
-        [buttons, ..goal_levels] ->
-          Ok({
-            let user_btn_numlists =
-              buttons
-              |> string.replace("(", "")
-              |> string.replace(")", "")
-              |> string.split(" ")
-              |> list.try_map(fn(nums) {
-                nums
-                |> string.split(",")
-                |> list.try_map(fn(num) {
-                  case int.parse(num) {
-                    Error(_) -> Error("err 3")
-                    Ok(n) -> Ok(n)
-                  }
-                })
-              })
-            case user_btn_numlists {
-              Error(_) -> todo as "idk 5"
-              Ok(btn_numlists) ->
-                case t {
-                  OnOffM -> {
-                    let btns =
-                      btn_numlists
-                      |> list.map(fn(btn) {
-                        list.fold(
-                          from: Button(bits: 0),
-                          over: btn,
-                          with: fn(btn_acc, num) {
-                            Button(btn_acc.bits |> int.bitwise_or(pow_2(num)))
-                          },
-                        )
-                      })
-                    let combos =
-                      all_combinations(btns) |> list.map(set.from_list)
-                    let assert Ok(first_combo) = combos |> list.first()
-                      as "ass4"
-                    let goal =
-                      goal
-                      |> string.to_graphemes
-                      |> list.drop(1)
-                      |> list.map(fn(c) {
-                        case c {
-                          "#" -> True
-                          "." -> False
-                          _ -> panic
-                        }
-                      })
-                    let gb =
-                      list.fold(from: #(0, 1), over: goal, with: fn(acc, b) {
-                        let acc_now = case b {
-                          True -> acc.0 |> int.bitwise_or(acc.1)
-                          False -> acc.0
-                        }
-                        #(acc_now, acc.1 * 2)
-                      })
-                    let goal_bits_parity = gb.0
-                    let num_bits = list.range(0, list.length(goal) - 1)
-                    OneLineOnOff(
-                      goal_bits_parity:,
-                      btns:,
-                      num_bits:,
-                      combos:,
-                      check_combo: first_combo,
-                      check_combo_parity: first_combo |> parity,
+      case rest |> string.concat |> string.split("{") {
+        [] -> Error("error parsing " <> line <> " could not find \"{\"")
+        [buttons, ..goal_levels] -> {
+          let user_btn_numlists =
+            buttons
+            |> string.trim
+            |> string.replace("(", "")
+            |> string.replace(")", "")
+            |> string.split(" ")
+            |> list.try_map(fn(nums) {
+              nums
+              |> string.split(",")
+              |> list.try_map(fn(num) {
+                case int.parse(num) {
+                  Error(_) ->
+                    Error(
+                      "could not parse int from "
+                      <> case num {
+                        "" -> "empty string"
+                        _ -> num
+                      },
                     )
-                  }
-                  LevelM -> {
-                    let btn_parity_combos: CombosForParity =
+                  Ok(n) -> Ok(n)
+                }
+              })
+            })
+          case user_btn_numlists {
+            Error(e) -> Error("parsing " <> line <> " got error " <> e)
+            Ok(btn_numlists) ->
+              Ok(case t {
+                OnOffM -> {
+                  let btns =
+                    btn_numlists
+                    |> list.map(fn(btn) {
                       list.fold(
-                        from: CombosForParity(cfp: dict.new()),
-                        over: all_combinations(btn_numlists),
-                        with: fn(acc, combination) {
-                          let num_amts =
-                            list.fold(
-                              from: dict.new(),
-                              over: combination,
-                              with: fn(outer_acc, btn) {
-                                list.fold(
-                                  from: outer_acc,
-                                  over: btn,
-                                  with: fn(inner_acc, num) {
-                                    let curr_val = inner_acc |> dict.get(num)
-                                    case curr_val {
-                                      Error(_) ->
-                                        inner_acc |> dict.insert(num, 1)
-                                      Ok(v) ->
-                                        inner_acc |> dict.insert(num, v + 1)
-                                    }
-                                  },
-                                )
-                              },
-                            )
-                          let new_cost =
-                            HowManyButtonsInCombo(
-                              buttons_used: combination |> list.length,
-                            )
-                          let new_amt = NumAmts(num_amts:)
-                          let parity = Levels(num_amts) |> levels_parity
-                          let existing = acc.cfp |> dict.get(parity)
-                          let with_new_cfp = case existing {
-                            Error(_) ->
-                              dict.new() |> dict.insert(new_amt, new_cost)
-                            Ok(others) -> {
-                              case others.combo |> dict.get(new_amt) {
-                                Error(_) ->
-                                  others.combo
-                                  |> dict.insert(new_amt, new_cost)
-                                Ok(combo_same_total) ->
-                                  others.combo
-                                  |> dict.insert(
-                                    new_amt,
-                                    HowManyButtonsInCombo(int.min(
-                                      combo_same_total.buttons_used,
-                                      new_cost.buttons_used,
-                                    )),
-                                  )
-                              }
-                            }
-                          }
-                          CombosForParity(
-                            cfp: acc.cfp
-                            |> dict.insert(
-                              parity,
-                              LevelButtonCombo(with_new_cfp),
-                            ),
-                          )
+                        from: Button(bits: 0),
+                        over: btn,
+                        with: fn(btn_acc, num) {
+                          Button(btn_acc.bits |> int.bitwise_or(pow_2(num)))
                         },
                       )
-                    let goal_ints =
-                      goal_levels
-                      |> string.concat
-                      |> string.drop_end(1)
-                      |> string.split(",")
-                      |> list.map(fn(x) {
-                        let assert Ok(n) = int.parse(x) as "ass5"
-                        n
-                      })
-                    let starting_levels =
-                      list.index_fold(
-                        from: dict.new(),
-                        over: goal_ints,
-                        with: fn(acc, amt, idx) { acc |> dict.insert(idx, amt) },
+                    })
+                  let combos = all_combinations(btns) |> list.map(set.from_list)
+                  case combos |> list.first() {
+                    Error(_) ->
+                      Error(
+                        "no button combinations, which should not happen if at least 1 button is provided",
                       )
-                    let starting_tree =
-                      LevelTree(
-                        levels: Levels(starting_levels),
-                        cost: CostUnknown,
-                        children: [],
-                        was_pulled_from_cache: False,
-                      )
-                    let starting_cache = case cache_enabled {
-                      True -> Some(LevelsCostCache(level_costs: dict.new()))
-                      False -> None
+                    Ok(first_combo) -> {
+                      let goal =
+                        goal
+                        |> string.to_graphemes
+                        |> list.drop(1)
+                        |> list.try_map(fn(c) {
+                          case c {
+                            "#" -> Ok(True)
+                            "." -> Ok(False)
+                            _ ->
+                              Error(
+                                "error parsing "
+                                <> line
+                                <> " indicator char "
+                                <> c
+                                <> " was not \".\" or \"#\"",
+                              )
+                          }
+                        })
+                      case goal {
+                        Error(e) -> Error(e)
+                        Ok(goal) ->
+                          Ok({
+                            let gb =
+                              list.fold(
+                                from: #(0, 1),
+                                over: goal,
+                                with: fn(acc, b) {
+                                  let acc_now = case b {
+                                    True -> acc.0 |> int.bitwise_or(acc.1)
+                                    False -> acc.0
+                                  }
+                                  #(acc_now, acc.1 * 2)
+                                },
+                              )
+                            let goal_bits_parity = gb.0
+                            let num_bits = list.range(0, list.length(goal) - 1)
+                            OneLineOnOff(
+                              goal_bits_parity:,
+                              btns:,
+                              num_bits:,
+                              combos:,
+                              check_combo: first_combo,
+                              check_combo_parity: first_combo |> parity,
+                            )
+                          })
+                      }
                     }
-                    OneLineLevel(
-                      combos: btn_parity_combos,
-                      tree: starting_tree,
-                      cost_for_levels: starting_cache,
-                    )
                   }
                 }
-            }
-          })
+                LevelM -> {
+                  let btn_parity_combos: CombosForParity =
+                    list.fold(
+                      from: CombosForParity(cfp: dict.new()),
+                      over: all_combinations(btn_numlists),
+                      with: fn(acc, combination) {
+                        let num_amts =
+                          list.fold(
+                            from: dict.new(),
+                            over: combination,
+                            with: fn(outer_acc, btn) {
+                              list.fold(
+                                from: outer_acc,
+                                over: btn,
+                                with: fn(inner_acc, num) {
+                                  let curr_val = inner_acc |> dict.get(num)
+                                  case curr_val {
+                                    Error(_) -> inner_acc |> dict.insert(num, 1)
+                                    Ok(v) ->
+                                      inner_acc |> dict.insert(num, v + 1)
+                                  }
+                                },
+                              )
+                            },
+                          )
+                        let new_cost =
+                          HowManyButtonsInCombo(
+                            buttons_used: combination |> list.length,
+                          )
+                        let new_amt = NumAmts(num_amts:)
+                        let parity = Levels(num_amts) |> levels_parity
+                        let existing = acc.cfp |> dict.get(parity)
+                        let with_new_cfp = case existing {
+                          Error(_) ->
+                            dict.new() |> dict.insert(new_amt, new_cost)
+                          Ok(others) -> {
+                            case others.combo |> dict.get(new_amt) {
+                              Error(_) ->
+                                others.combo
+                                |> dict.insert(new_amt, new_cost)
+                              Ok(combo_same_total) ->
+                                others.combo
+                                |> dict.insert(
+                                  new_amt,
+                                  HowManyButtonsInCombo(int.min(
+                                    combo_same_total.buttons_used,
+                                    new_cost.buttons_used,
+                                  )),
+                                )
+                            }
+                          }
+                        }
+                        CombosForParity(
+                          cfp: acc.cfp
+                          |> dict.insert(parity, LevelButtonCombo(with_new_cfp)),
+                        )
+                      },
+                    )
+                  let goal_ints =
+                    goal_levels
+                    |> string.concat
+                    |> string.drop_end(1)
+                    |> string.split(",")
+                    |> list.try_map(fn(num) {
+                      case int.parse(num) {
+                        Ok(n) -> Ok(n)
+                        Error(_) ->
+                          Error(
+                            "parsing "
+                            <> line
+                            <> " could not parse int from "
+                            <> case num {
+                              "" -> "empty string"
+                              _ -> num
+                            },
+                          )
+                      }
+                    })
+                  case goal_ints {
+                    Error(e) -> Error(e)
+                    Ok(goal_ints) -> {
+                      let starting_levels =
+                        list.index_fold(
+                          from: dict.new(),
+                          over: goal_ints,
+                          with: fn(acc, amt, idx) {
+                            acc |> dict.insert(idx, amt)
+                          },
+                        )
+                      let starting_tree =
+                        LevelTree(
+                          levels: Levels(starting_levels),
+                          cost: CostUnknown,
+                          children: [],
+                          was_pulled_from_cache: False,
+                        )
+                      let starting_cache = case cache_enabled {
+                        True -> Some(LevelsCostCache(level_costs: dict.new()))
+                        False -> None
+                      }
+                      Ok(OneLineLevel(
+                        combos: btn_parity_combos,
+                        tree: starting_tree,
+                        cost_for_levels: starting_cache,
+                      ))
+                    }
+                  }
+                }
+              })
+          }
+        }
       }
     }
   }
   case ret {
-    Ok(o) -> Ok(o)
+    Ok(Ok(o)) -> Ok(o)
+    Ok(Error(e)) -> Error(e)
     Error(e) -> Error(e)
   }
 }
@@ -1217,21 +1297,22 @@ fn view(model: Model) -> Element(Msg) {
               h.text("")
             }
             Ok(_) -> {
-              h.span([], [
-                h.text("min press sum: "),
-                h.span(
-                  [
-                    a.style("font-size", "1.4em"),
-                    a.style("display", "inline-block"),
-                  ],
-                  [
-                    h.text(case model.count {
-                      Ok(n) -> n |> int.to_string
-                      Error(s) -> s
-                    }),
-                  ],
-                ),
-              ])
+              case model.count {
+                Ok(n) ->
+                  h.span([], [
+                    h.text("min press sum: "),
+                    h.span(
+                      [
+                        a.style("font-size", "1.4em"),
+                        a.style("display", "inline-block"),
+                      ],
+                      [
+                        h.text(n |> int.to_string),
+                      ],
+                    ),
+                  ])
+                Error(s) -> h.text(s)
+              }
             }
           },
         ],
