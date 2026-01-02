@@ -982,9 +982,6 @@ fn all_combinations(l) {
 fn view(model: Model) -> Element(Msg) {
   h.article(
     [
-      a.style("background", "#292d3e"),
-      a.style("color", "#fefefc"),
-      a.style("font-family", "verdana, helvetica, sans-serif"),
       a.style("height", "#100%"),
       a.style("margin", "0px"),
       a.style("display", "flex"),
@@ -1347,7 +1344,11 @@ fn view(model: Model) -> Element(Msg) {
               check_combo_parity:,
             ) -> {
               h.pre(
-                [a.style("font-size", "3em"), a.style("overflow", "visible")],
+                [
+                  a.style("font-size", "3em"),
+                  a.style("margin", "0px"),
+                  a.style("padding", "39px"),
+                ],
                 list.reverse(
                   list.fold(from: [], over: num_bits, with: fn(light_acc, bit) {
                     let light_on =
