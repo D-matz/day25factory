@@ -86,10 +86,12 @@ const init_input = "[.##.] (3) (1,3) (2) (2,3) (0,2) (0,1) {3,5,4,7}
 
 // MODEL -----------------------------------------------------------------------
 
+//for p1 only, a button is just its on/off bits
 type Button {
   Button(bits: Int)
 }
 
+//for p2 >1 amounts matter, needed in combos of buttons to subtract
 pub type NumAmts {
   NumAmts(num_amts: Dict(Int, Int))
 }
@@ -1105,11 +1107,33 @@ fn view(model: Model) -> Element(Msg) {
             h.span(
               [
                 a.style("margin-left", "15px"),
+                a.style("white-space", "nowrap"),
                 a.title(
-                  "Set colors for joltage levels unknown, impossible, and calculated.",
+                  "Set colors for joltage levels known, unknown, impossible.",
                 ),
               ],
               [
+                h.input([
+                  a.type_("color"),
+                  a.value(model.colors.val),
+                  a.id("c"),
+                  a.style("margin-left", "3px"),
+                  a.disabled(case model.onoff_or_level_input {
+                    LevelM -> False
+                    OnOffM -> True
+                  }),
+                  event.on_input(UserSetCalculatedcolor),
+                ]),
+                h.label(
+                  [
+                    a.for("c"),
+                    a.style("opacity", case model.onoff_or_level_input {
+                      LevelM -> "1.0"
+                      OnOffM -> "0.3"
+                    }),
+                  ],
+                  [h.text("known")],
+                ),
                 h.input([
                   a.type_("color"),
                   a.value(model.colors.unknown),
@@ -1130,27 +1154,6 @@ fn view(model: Model) -> Element(Msg) {
                     }),
                   ],
                   [h.text("unknown")],
-                ),
-                h.input([
-                  a.type_("color"),
-                  a.value(model.colors.val),
-                  a.id("c"),
-                  a.style("margin-left", "3px"),
-                  a.disabled(case model.onoff_or_level_input {
-                    LevelM -> False
-                    OnOffM -> True
-                  }),
-                  event.on_input(UserSetCalculatedcolor),
-                ]),
-                h.label(
-                  [
-                    a.for("c"),
-                    a.style("opacity", case model.onoff_or_level_input {
-                      LevelM -> "1.0"
-                      OnOffM -> "0.3"
-                    }),
-                  ],
-                  [h.text("calculated")],
                 ),
                 h.input([
                   a.type_("color"),
