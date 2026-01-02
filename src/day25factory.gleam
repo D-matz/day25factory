@@ -227,123 +227,9 @@ type Msg {
 fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     ClockTickedForward(timer) -> {
-      case maybevalid.out {
-        Error(_) -> {
-          #(maybevalid, effect.none())
-        }
-        Ok(m) -> {
-          case timer.index == maybevalid.on_index {
-            False -> #(maybevalid, effect.none())
-            True -> {
-              case m {
-                OneLineOnOff(
-                  btns:,
-                  goal_bits_parity:,
-                  num_bits:,
-                  combos:,
-                  check_combo:,
-                  check_combo_parity:,
-                ) -> {
-                  case check_combo_parity == goal_bits_parity {
-                    True -> {
-                      let new_ct = case maybevalid.count {
-                        Error(_) -> maybevalid.count
-                        Ok(ct) -> Ok(ct + set.size(check_combo))
-                      }
-                      add_count_go_next_line(maybevalid, timer.index, new_ct)
-                    }
-                    False -> {
-                      case combos {
-                        [fst_combo, ..rest_combos] -> {
-                          let curr_problem_next_combo =
-                            OneLineOnOff(
-                              check_combo: fst_combo,
-                              check_combo_parity: fst_combo |> parity,
-                              combos: rest_combos,
-                              btns:,
-                              goal_bits_parity:,
-                              num_bits:,
-                            )
-                          #(
-                            Model(
-                              ..maybevalid,
-                              out: Ok(curr_problem_next_combo),
-                            ),
-                            tick(timer, maybevalid.set_speed),
-                          )
-                        }
-                        [] -> {
-                          #(
-                            Model(
-                              ..maybevalid,
-                              count: Error(
-                                "no button combinations work for indicator lights goal "
-                                <> "["
-                                <> {
-                                  goal_bits_parity
-                                  |> int.to_base2
-                                  |> string.to_graphemes()
-                                  |> list.map(fn(bit) {
-                                    case bit {
-                                      "1" -> "#"
-                                      "0" -> "."
-                                      _ -> panic as "not zero??"
-                                    }
-                                  })
-                                  |> string.concat
-                                  |> fn(s) {
-                                    case
-                                      string.length(s) != list.length(num_bits)
-                                    {
-                                      True -> "." <> s
-                                      False -> s
-                                    }
-                                  }
-                                  |> string.reverse
-                                }
-                                <> "]",
-                              ),
-                            ),
-                            effect.none(),
-                          )
-                        }
-                      }
-                    }
-                  }
-                }
-                OneLineLevel(combos:, tree:, cost_for_levels:) -> {
-                  case tree.cost {
-                    CostUnknown -> {
-                      let #(updated_tree, new_cache) =
-                        lt_one_step(combos, tree, cost_for_levels)
-                      let updated_line =
-                        OneLineLevel(
-                          combos:,
-                          tree: updated_tree,
-                          cost_for_levels: new_cache,
-                        )
-                      #(
-                        Model(..maybevalid, out: Ok(updated_line)),
-                        tick(timer, maybevalid.set_speed),
-                      )
-                    }
-                    CostImpossible -> {
-                      let new_ct = Error("impossible input: " <> maybevalid.in)
-                      add_count_go_next_line(maybevalid, timer.index, new_ct)
-                    }
-                    CostVal(tree_min_ct) -> {
-                      let new_ct = case maybevalid.count {
-                        Error(_) -> maybevalid.count
-                        Ok(ct) -> Ok(ct + tree_min_ct)
-                      }
-                      add_count_go_next_line(maybevalid, timer.index, new_ct)
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+      case maybevalid.play {
+        True -> main_one_step(maybevalid, timer)
+        False -> #(maybevalid, effect.none())
       }
     }
     UserSelectedType(newtype) -> {
@@ -417,7 +303,13 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }
     }
-    UserClickedStep -> todo as "idk 4"
+    UserClickedStep -> #(
+      main_one_step(
+        maybevalid,
+        TimerTick(millisec: -1, index: maybevalid.on_index),
+      ).0,
+      effect.none(),
+    )
     UserFlippedTree -> #(
       Model(..maybevalid, flip_tree: !maybevalid.flip_tree),
       effect.none(),
@@ -453,6 +345,122 @@ fn update(maybevalid: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..maybevalid, colors: CostColors(..maybevalid.colors, val: rgb)),
       effect.none(),
     )
+  }
+}
+
+fn main_one_step(maybevalid: Model, timer: TimerTick) -> #(Model, Effect(Msg)) {
+  case maybevalid.out {
+    Error(_) -> {
+      #(maybevalid, effect.none())
+    }
+    Ok(m) -> {
+      case timer.index == maybevalid.on_index {
+        False -> #(maybevalid, effect.none())
+        True -> {
+          case m {
+            OneLineOnOff(
+              btns:,
+              goal_bits_parity:,
+              num_bits:,
+              combos:,
+              check_combo:,
+              check_combo_parity:,
+            ) -> {
+              case check_combo_parity == goal_bits_parity {
+                True -> {
+                  let new_ct = case maybevalid.count {
+                    Error(_) -> maybevalid.count
+                    Ok(ct) -> Ok(ct + set.size(check_combo))
+                  }
+                  add_count_go_next_line(maybevalid, timer.index, new_ct)
+                }
+                False -> {
+                  case combos {
+                    [fst_combo, ..rest_combos] -> {
+                      let curr_problem_next_combo =
+                        OneLineOnOff(
+                          check_combo: fst_combo,
+                          check_combo_parity: fst_combo |> parity,
+                          combos: rest_combos,
+                          btns:,
+                          goal_bits_parity:,
+                          num_bits:,
+                        )
+                      #(
+                        Model(..maybevalid, out: Ok(curr_problem_next_combo)),
+                        tick(timer, maybevalid.set_speed),
+                      )
+                    }
+                    [] -> {
+                      #(
+                        Model(
+                          ..maybevalid,
+                          count: Error(
+                            "no button combinations work for indicator lights goal "
+                            <> "["
+                            <> {
+                              goal_bits_parity
+                              |> int.to_base2
+                              |> string.to_graphemes()
+                              |> list.map(fn(bit) {
+                                case bit {
+                                  "1" -> "#"
+                                  "0" -> "."
+                                  _ -> panic as "not zero??"
+                                }
+                              })
+                              |> string.concat
+                              |> fn(s) {
+                                case string.length(s) != list.length(num_bits) {
+                                  True -> "." <> s
+                                  False -> s
+                                }
+                              }
+                              |> string.reverse
+                            }
+                            <> "]",
+                          ),
+                        ),
+                        effect.none(),
+                      )
+                    }
+                  }
+                }
+              }
+            }
+            OneLineLevel(combos:, tree:, cost_for_levels:) -> {
+              case tree.cost {
+                CostUnknown -> {
+                  let #(updated_tree, new_cache) =
+                    lt_one_step(combos, tree, cost_for_levels)
+                  let updated_line =
+                    OneLineLevel(
+                      combos:,
+                      tree: updated_tree,
+                      cost_for_levels: new_cache,
+                    )
+                  #(
+                    Model(..maybevalid, out: Ok(updated_line)),
+                    tick(timer, maybevalid.set_speed),
+                  )
+                }
+                CostImpossible -> {
+                  let new_ct = Error("impossible input: " <> maybevalid.in)
+                  add_count_go_next_line(maybevalid, timer.index, new_ct)
+                }
+                CostVal(tree_min_ct) -> {
+                  let new_ct = case maybevalid.count {
+                    Error(_) -> maybevalid.count
+                    Ok(ct) -> Ok(ct + tree_min_ct)
+                  }
+                  add_count_go_next_line(maybevalid, timer.index, new_ct)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 
